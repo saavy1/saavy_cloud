@@ -1,0 +1,8 @@
+.direnv/
+node_modules/
+.dev.vars
+.cf/
+.wrangler/
+dist/
+.prod.vars
+.cloudflare/
