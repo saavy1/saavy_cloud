@@ -2,6 +2,8 @@
 //
 //   node import/run.ts plan                         what would be imported (no model calls)
 //   node import/run.ts build [--limit N] [--model provider/id] [--thinking level] [--jobs 32] [--lookahead 64] [--db path]
+//                     [--sources all|coding] [--reuse old.sqlite]   coding: the coding agents only (no chat-app exports);
+//                                                   reuse: take single-message summaries an earlier build made
 //                                                   build the log and its summaries; resumable, and a larger --limit
 //                                                   later extends the same log (sessions keep their order)
 //   node import/run.ts samples [--db path]          summaries from each level, to judge their quality
@@ -58,7 +60,7 @@ function rows(sessions: readonly ImportSession[], limit: number): { rows: Row[];
 }
 
 function plan(): void {
-	const { sessions, skipped } = collect();
+	const { sessions, skipped } = collect(arg("sources") !== "coding");
 	const all = rows(sessions, Number.POSITIVE_INFINITY);
 	const bySource = new Map<string, { sessions: number; messages: number; over: number; bytes: number }>();
 	for (const session of sessions) {
@@ -155,14 +157,17 @@ async function build(): Promise<void> {
 	mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 	const store = new NodeSqliteStore(dbPath);
 	// The plan is frozen at the first build: sessions still in use keep growing, and a resume must see the same rows.
+	const have = store.logLength();
 	const cutoff = Number(store.meta("cutoff") ?? Date.now());
 	if (store.meta("cutoff") === undefined) store.setMeta("cutoff", String(cutoff));
-	const frozen = collect().sessions.flatMap((session) => {
+	// Which sources this database holds is fixed at its first build too (one built before the choice existed: coding).
+	const sources = store.meta("sources") ?? (have > 0 ? "coding" : (arg("sources") ?? "all"));
+	if (store.meta("sources") === undefined) store.setMeta("sources", sources);
+	const frozen = collect(sources !== "coding").sessions.flatMap((session) => {
 		const messages = session.messages.filter((message) => message.date <= cutoff);
 		return messages.length === 0 ? [] : [{ ...session, messages }];
 	});
 	const planned = rows(frozen, limit);
-	const have = store.logLength();
 	if (have > planned.rows.length) throw new Error(`${dbPath} already holds ${have} rows, more than this --limit plans (${planned.rows.length}).`);
 	// The rows already stored must be the same ones (same order); then the rest is appended.
 	for (const probe of [0, have - 1]) if (have > 0 && store.logGet(probe)?.key !== planned.rows[probe]!.key) throw new Error(`${dbPath} was built from a different plan; use a fresh --db.`);
@@ -175,6 +180,22 @@ async function build(): Promise<void> {
 	const fresh = planned.rows.slice(have).map((row) => ({ ...row, size: bytes(`${row.kind}: ${row.text}`) }));
 	console.log(`${spec}: history up to ${when(cutoff)}; ${have} rows stored, appending ${fresh.length} (${planned.sessions} sessions); secrets redacted ${JSON.stringify(planned.hits)}`);
 	for (let at = 0; at < fresh.length; at += 2000) memory.log.append(fresh.slice(at, at + 2000));
+	// A message summarizes the same wherever it sits: take what an earlier build already wrote for it.
+	const reuse = arg("reuse");
+	if (reuse !== undefined && fresh.length > 0) {
+		const old = new NodeSqliteStore(reuse);
+		const known = new Map((old.db.prepare("SELECT g.key AS key, t.text AS text FROM saavy_tree t JOIN saavy_log g ON g.i = t.i WHERE t.l = 0").all() as { key: string; text: string }[]).map((row) => [row.key, row.text]));
+		let reused = 0;
+		for (let i = have; i < memory.log.length; i++) {
+			const message = memory.log.at(i)!;
+			const text = known.get(message.key);
+			if (text === undefined || memory.tree.has(0, i)) continue;
+			memory.tree.put({ l: 0, i, text, size: bytes(text), key: message.key });
+			reused++;
+		}
+		console.log(`reused ${reused} single-message summaries from ${reuse}`);
+		memory.view.fit();
+	}
 	memory.pump();
 
 	const started = Date.now();

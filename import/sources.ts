@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { bytes, cap, messagesOf } from "../core/log.ts";
 import type { Kind } from "../core/store.ts";
+import { chatAppSessions } from "./chatapps.ts";
 
 export interface ImportMessage {
 	readonly kind: Kind;
@@ -314,8 +315,11 @@ function saavySessions(): ImportSession[] {
 	return built === undefined ? [] : [built];
 }
 
-/** Every source, filtered and sorted by when each session started. */
-export function collect(): { sessions: ImportSession[]; skipped: Skipped[] } {
+/**
+ * Every source, filtered and sorted by when each session started. `chatApps` adds the Claude.ai and ChatGPT exports,
+ * in time order with the rest (the view shows recent history finest, so position must follow time).
+ */
+export function collect(chatApps = true): { sessions: ImportSession[]; skipped: Skipped[] } {
 	const skipped: Skipped[] = [];
 	const seen = new Set<string>();
 	const all = [
@@ -325,6 +329,7 @@ export function collect(): { sessions: ImportSession[]; skipped: Skipped[] } {
 		...codexSessions(),
 		...hermesSessions(skipped),
 		...saavySessions(),
+		...(chatApps ? chatAppSessions() : []),
 	];
 	const tmp: Skipped = { reason: "sessions run in /tmp", sessions: 0, messages: 0 };
 	const kept = all.filter((session) => {
