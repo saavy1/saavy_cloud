@@ -59,7 +59,7 @@ import { homedir } from "node:os";
 import { cap } from "../core/log.ts";
 import type { RemoteSaavy as Saavy } from "./remote.ts";
 import { CLEARED, commands, findCommand, setAgentIds, type Ui } from "./commands.ts";
-import { applyUpdate, checkUi, toText, type UiNode, type UiUpdate } from "./ui.ts";
+import { applyUpdate, checkUi, toText, type UiNode, type UiUpdate } from "../core/ui.ts";
 import { createKeybindings, theme } from "./pi-internals.ts";
 
 const context = BACKGROUND_CONTEXT;

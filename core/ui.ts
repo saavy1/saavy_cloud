@@ -1,8 +1,9 @@
-// Generative UI: the agent describes UI as a tree of Tern Surface Protocol nodes ({ k, id?, p?, c? }) and saavy draws
-// it. In Tern it is native (tables, charts, checklists, forms with buttons that talk back); elsewhere a text rendering.
-// TSP is declarative and safe (no scripts, no raw HTML, theme tokens instead of colors), so the agent can write it
-// directly. saavy checks kinds against an allowlist, caps the size, and namespaces every id, so agent UI can never
-// collide with saavy's own nodes.
+// Generative UI: the agent describes UI once, as a tree of nodes ({ k, id?, p?, c? }, the Tern Surface Protocol's
+// vocabulary), and every front end draws it as well as it can: Tern natively (tables, charts, checklists, forms with
+// buttons that talk back), other terminals as text (toText), later clients their own way. The spec is declarative and
+// safe (no scripts, no raw HTML, theme tokens instead of colors). It lives in the transcript as the show call's
+// arguments, so any client, at any time, can draw it from history. This module is the shared part: kinds, checks,
+// updates, the text rendering, and what the agent is told.
 
 export interface UiNode {
 	readonly k: string;
@@ -50,39 +51,6 @@ export function checkUi(spec: unknown): string | undefined {
 		return undefined;
 	};
 	return walk(spec, 0, "ui");
-}
-
-/** A drawn UI: its wire tree and the map between the agent's ids and wire ids. */
-export interface WireUi {
-	readonly node: Record<string, unknown>;
-	readonly wire: Map<string, string>;
-	readonly agent: Map<string, string>;
-}
-
-/**
- * The spec as wire nodes under `prefix`: every node gets an id (the agent's own, else its path), namespaced; a
- * table's or list's `selected` and a card's head child keep pointing at the renamed ids.
- */
-export function toWire(spec: UiNode, prefix: string): WireUi {
-	const wire = new Map<string, string>();
-	const agent = new Map<string, string>();
-	const convert = (node: UiNode, path: string): Record<string, unknown> => {
-		const local = node.id ?? path;
-		const id = `${prefix}.${local}`;
-		wire.set(local, id);
-		agent.set(id, local);
-		const children = (node.c ?? []).map((child, n) => convert(child, `${path}-${n}`));
-		return { id, k: node.k, ...(node.p === undefined ? {} : { p: { ...node.p } }), ...(children.length === 0 ? {} : { c: children }) };
-	};
-	const node = convert(spec, "n");
-	// Props that name other nodes by id follow the renaming.
-	const fix = (wireNode: Record<string, unknown>): void => {
-		const p = wireNode.p as Record<string, unknown> | undefined;
-		if (p !== undefined && typeof p.selected === "string" && wire.has(p.selected)) p.selected = wire.get(p.selected);
-		for (const child of (wireNode.c as Record<string, unknown>[] | undefined) ?? []) fix(child);
-	};
-	fix(node);
-	return { node, wire, agent };
 }
 
 export interface UiUpdate {
@@ -204,7 +172,7 @@ export function toText(node: UiNode, depth = 0): string {
 
 // ─── What the model is told ───
 
-export const SHOW_DESCRIPTION = `Show the user native UI in their terminal instead of (or beside) prose: tables, charts, checklists, key/value lists, trees, meters, diffs, and forms with buttons. \`ui\` is one node { k, id?, p?, c? } (kind, your id, props, children). \`handle\` names it: show again with the same handle to replace it, update_ui to change parts of it live. Clicks on buttons (el tag "button" with p.actions {click:"<name>"}) and list items reach you as a message starting "[ui <handle>]", with the form's checkbox and radio values. Inline UIs sit in the transcript; placement "panel" opens a pane beside the chat that stays in view while you keep talking (dashboards, live progress, anything large or long-lived); a side panel is half the width, so use "panel-down" for wide tables, or fewer columns. Keep it purposeful. Kinds and their main props (ui_reference(kind) for the rest):
+export const SHOW_DESCRIPTION = `Show the user UI instead of (or beside) prose: tables, charts, checklists, key/value lists, trees, meters, diffs, and forms with buttons. It is drawn by whichever front end the user has open: natively in Tern, as text in other terminals, and possibly elsewhere later, so it must read well as text too (prefer tables, kv, checklists, md; give every chart or meter a label or summary with the numbers). Buttons and panels only work in rich clients; never make a UI the only way to do something. \`ui\` is one node { k, id?, p?, c? } (kind, your id, props, children). \`handle\` names it: show again with the same handle to replace it, update_ui to change parts of it live. Clicks on buttons (el tag "button" with p.actions {click:"<name>"}) and list items reach you as a message starting "[ui <handle>]", with the form's checkbox and radio values. Inline UIs sit in the transcript; placement "panel" (a hint: clients without panes draw it inline) opens a pane beside the chat that stays in view while you keep talking (dashboards, live progress, anything large or long-lived); a side panel is half the width, so use "panel-down" for wide tables, or fewer columns. Keep it purposeful. Kinds and their main props (ui_reference(kind) for the rest):
 - layout: col/row {gap:"sm"|"md", align, justify}; card {head, tone, collapsible, collapsed}; section {head, collapsible}; rule {label}
 - text: md {text} (GFM, tables, mermaid); text {text|spans}; code {text, lang}; diff {text: unified diff}; math {text}
 - data: kv {items:[{k,v}]}; table {cols:[{id,head,align}], rows:[{id,cells:{<colId>:value}}]}; tree {nodes:[{id,label,open,children}]}; list {selected} of item {label, detail, icon}; badge {text, tone}

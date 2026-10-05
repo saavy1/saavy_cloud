@@ -87,7 +87,7 @@ export class Brain extends DurableObject<Env> {
 					thinking: () => this.settings.get().subagent?.thinking,
 				},
 			);
-			const master = [CodingTools, replay, optchat.memory, codemode, optchat.master, subagents];
+			const master = [CodingTools, replay, optchat.memory, codemode, optchat.ui, optchat.master, subagents];
 			for (const extension of [...master, optchat.sub]) registry.install(extension);
 			const pi = await Harness.open(
 				storage,

@@ -8,6 +8,7 @@ import { defineDoc, defineExtension, defineTool, type Extension, GenerationTask,
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { Memory } from "../core/memory.ts";
 import { DATE_DESCRIPTION, MASTER, SEARCH_DESCRIPTION, SUBAGENT, VIEW_DOC, ZOOM_DESCRIPTION } from "../core/prompts.ts";
+import { checkUi, checkUpdate, SHOW_DESCRIPTION, UI_REFERENCE, type UiNode, type UiUpdate, UPDATE_DESCRIPTION } from "../core/ui.ts";
 
 export const TurnDoc = defineDoc<{ view: string }>({
 	kind: "saavy.turn",
@@ -69,6 +70,11 @@ export interface OptChatExtensions {
 	readonly master: Extension;
 	/** A subagent's prompt (its view arrives in its first message). */
 	readonly sub: Extension;
+	/**
+	 * show, update_ui, ui_reference: the brain only checks a spec; front ends draw it from the transcript (the call's
+	 * arguments), each as well as it can.
+	 */
+	readonly ui: Extension;
 }
 
 export function createExtensions(memory: () => Memory, cache: InstructionsCache): OptChatExtensions {
@@ -128,5 +134,56 @@ export function createExtensions(memory: () => Memory, cache: InstructionsCache)
 		],
 	});
 	const Sub = defineExtension({ name: "saavy-subagent", sections: prompt(SUBAGENT) });
-	return { memory: Memory, master: Master, sub: Sub };
+	const Ui = defineExtension({
+		name: "saavy-ui",
+		tools: [
+			defineTool({
+				name: "show",
+				description: SHOW_DESCRIPTION,
+				parameters: Type.Object({
+					handle: Type.String({ description: "A short name for this UI, [A-Za-z0-9_-]." }),
+					title: Type.Optional(Type.String()),
+					placement: Type.Optional(
+						Type.Union([Type.Literal("inline"), Type.Literal("panel"), Type.Literal("panel-down")], {
+							description: "inline (default): in the transcript. panel / panel-down: a pane beside / below the chat where the client has panes (Tern); elsewhere inline.",
+						}),
+					),
+					ui: Type.Unsafe<UiNode>({ type: "object", description: "One node: { k, id?, p?, c? }." }),
+				}),
+				replay: "safe",
+				execute: async (args) => {
+					if (!/^[A-Za-z0-9_-]{1,40}$/.test(args.handle)) return { content: [{ type: "text", text: "handle must be 1-40 characters of [A-Za-z0-9_-]" }], isError: true };
+					const error = checkUi(args.ui);
+					if (error !== undefined) return { content: [{ type: "text", text: `Not shown: ${error}` }], isError: true };
+					return { content: [{ type: "text", text: `Shown as "${args.handle}". Clicks (in clients that have them) reach you as messages starting "[ui ${args.handle}]".` }] };
+				},
+			}),
+			defineTool({
+				name: "update_ui",
+				description: UPDATE_DESCRIPTION,
+				parameters: Type.Object({
+					handle: Type.String(),
+					set: Type.Optional(Type.Array(Type.Object({ id: Type.String(), props: Type.Record(Type.String(), Type.Unknown()) }))),
+					append: Type.Optional(Type.Array(Type.Object({ id: Type.String(), text: Type.String() }))),
+					ui: Type.Optional(Type.Unsafe<UiNode>({ type: "object" })),
+				}),
+				replay: "safe",
+				execute: async (args) => {
+					const error = checkUpdate(args as UiUpdate);
+					if (error !== undefined) return { content: [{ type: "text", text: `Not updated: ${error}` }], isError: true };
+					return { content: [{ type: "text", text: `Updated "${args.handle}".` }] };
+				},
+			}),
+			defineTool({
+				name: "ui_reference",
+				description: "The props of one UI kind, for show and update_ui.",
+				parameters: Type.Object({ kind: Type.String() }),
+				replay: "safe",
+				execute: async (args) => ({
+					content: [{ type: "text", text: UI_REFERENCE[args.kind] ?? `No details for "${args.kind}". Kinds with details: ${Object.keys(UI_REFERENCE).join(", ")}.` }],
+				}),
+			}),
+		],
+	});
+	return { memory: Memory, master: Master, sub: Sub, ui: Ui };
 }
