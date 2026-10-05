@@ -3,6 +3,7 @@
 //
 //   SAAVY_URL=https://… SAAVY_TOKEN=… node client/main.ts      (or ~/.config/saavy/cloud.json: { "url", "token" })
 //   --no-runner   draw only; another runner (or none) serves the tools
+// A standalone runner on this machine (the saavy-runner service) already serves them; then none is started here.
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -26,7 +27,18 @@ const { url, token } = settings();
 const home = process.env.SAAVY_CLIENT_HOME ?? join(homedir(), ".saavy", "cloud");
 mkdirSync(home, { recursive: true, mode: 0o700 });
 
-const runner = process.argv.includes("--no-runner") ? undefined : startRunner({ url, token });
+/** Whether the standalone runner (runner/runner.ts, which leaves its pid) is running on this machine. */
+function standaloneRunner(): boolean {
+	try {
+		const pid = Number(readFileSync(join(homedir(), ".saavy", "runner.pid"), "utf8"));
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+const runner = process.argv.includes("--no-runner") || standaloneRunner() ? undefined : startRunner({ url, token });
 
 let saavy: RemoteSaavy;
 try {
