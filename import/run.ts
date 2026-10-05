@@ -6,8 +6,8 @@
 //                                                   later extends the same log (sessions keep their order)
 //   node import/run.ts samples [--db path]          summaries from each level, to judge their quality
 //
-// The compactor model defaults to opencode-go/space-bunny-free (OPENCODE_API_KEY); openrouter/… models use
-// OPENROUTER_API_KEY, else pi's auth.json.
+// The compactor model defaults to opencode-go/space-bunny-free: OPENCODE_API_KEY, else ~/.saavy/import/opencode.key.
+// openrouter/… models use OPENROUTER_API_KEY, else pi's auth.json.
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -83,6 +83,8 @@ function models(): Models {
 	const runtime = createModels();
 	runtime.setProvider(opencodeGoProvider());
 	runtime.setProvider(openrouterProvider());
+	const opencodeKey = join(homedir(), ".saavy", "import", "opencode.key");
+	if (process.env.OPENCODE_API_KEY === undefined && existsSync(opencodeKey)) process.env.OPENCODE_API_KEY = readFileSync(opencodeKey, "utf8").trim();
 	if (process.env.OPENROUTER_API_KEY === undefined) {
 		const auth = join(homedir(), ".pi", "agent", "auth.json");
 		const key = existsSync(auth) ? (JSON.parse(readFileSync(auth, "utf8")) as { openrouter?: { key?: string } }).openrouter?.key : undefined;
@@ -147,7 +149,7 @@ async function build(): Promise<void> {
 	const runtime = models();
 	const model = runtime.getModel(spec.slice(0, slash), spec.slice(slash + 1)) as Model<Api> | undefined;
 	if (model === undefined) throw new Error(`Unknown model ${spec}`);
-	if (spec.startsWith("opencode-go/") && process.env.OPENCODE_API_KEY === undefined) throw new Error("Set OPENCODE_API_KEY (an OpenCode Go key).");
+	if (spec.startsWith("opencode-go/") && process.env.OPENCODE_API_KEY === undefined) throw new Error("Put your OpenCode Go key in ~/.saavy/import/opencode.key (or set OPENCODE_API_KEY).");
 
 	mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 	const store = new NodeSqliteStore(dbPath);
