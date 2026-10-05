@@ -20,7 +20,7 @@ import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { bytes } from "../core/log.ts";
-import { Memory } from "../core/memory.ts";
+import { cleanSummary, Memory } from "../core/memory.ts";
 import type { Kind } from "../core/store.ts";
 import { scrub } from "./scrub.ts";
 import { collect, type ImportSession } from "./sources.ts";
@@ -259,17 +259,21 @@ async function upload(): Promise<void> {
 			["tree", "SELECT l, i, text, size, key FROM saavy_tree ORDER BY l, i"],
 		] as const) {
 			let batch: unknown[] = [];
-			let bytes = 0;
+			let pending = 0;
 			for (const row of store.db.prepare(query).iterate() as Iterable<Record<string, unknown>>) {
 				const size = String(row.text).length + 200;
-				if (bytes + size > BATCH && batch.length > 0) {
+				if (pending + size > BATCH && batch.length > 0) {
 					at = table === "log" ? await send(batch, []) : await send([], batch);
 					batch = [];
-					bytes = 0;
+					pending = 0;
 					process.stdout.write(`\r${at.log}/${expect.log} messages, ${at.tree}/${expect.tree} summaries`);
 				}
-				batch.push({ ...row });
-				bytes += size;
+				// Summaries cleaned of prompt scaffolding a model copied in (the build cleans new ones itself).
+				if (table === "tree") {
+					const text = cleanSummary(String(row.text));
+					batch.push({ ...row, text, size: bytes(text) });
+				} else batch.push({ ...row });
+				pending += size;
 			}
 			if (batch.length > 0) at = table === "log" ? await send(batch, []) : await send([], batch);
 		}

@@ -48,6 +48,18 @@ const flat = (text: string): string => text.replace(/\s*\n\s*/g, " ");
 
 export { cutBytes };
 
+/**
+ * A summary without what the prompt only showed for scale: the retry note's marker, and pieces of the 512-byte ruler
+ * (dot runs with the byte counts), which a model now and then copies in.
+ */
+export function cleanSummary(text: string): string {
+	return text
+		.replace(/\s*\|?\s*← LIMIT\s*/g, " ")
+		.replace(/\.{8,}\d{0,3}(?:\.+\d{1,3})*\.*/g, "")
+		.replace(/\s{2,}/g, " ")
+		.trim();
+}
+
 /** Let a timer not hold a Node process open; workerd timers have no unref. */
 const unref = (timer: unknown): void => (timer as { unref?: () => void }).unref?.();
 
@@ -299,12 +311,10 @@ export class Memory {
 		const tries: string[] = [];
 		for (;;) {
 			const reply = await this.#ask(model, thinking, messages);
-			const line = reply.content
+			const raw = reply.content
 				.flatMap((block) => (block.type === "text" ? [block.text] : []))
-				.join("")
-				// The retry note marks where the limit falls; a model may echo the marker back.
-				.replace(/\s*\|?\s*← LIMIT\s*/g, " ")
-				.trim();
+				.join("");
+			const line = cleanSummary(raw);
 			if (line === "") throw new Error(`Empty summary for ${start(l, i)}+${2 ** l}`);
 			tries.push(line);
 			if (bytes(line) <= NODE || tries.length >= TRIES) break;
