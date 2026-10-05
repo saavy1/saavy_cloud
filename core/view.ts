@@ -1,6 +1,7 @@
 // The view (spec §5): tree nodes tiling the whole chat, oldest first, under a byte budget. It only ever appends at
 // the end and merges the most due pair; it never splits, so its start stays stable from one call to the next.
-// Its parts are saved with every change, so a brain that wakes does not refold the chat from message 0.
+// Its parts are saved (at most once a second; a stale save is still a valid start), so a brain that wakes does not
+// refold the chat from message 0. Every change visits each line, so per-line work stays in memory.
 
 import { bytes, type Log } from "./log.ts";
 import { PLACEHOLDER } from "./prompts.ts";
@@ -13,6 +14,8 @@ export type { Part } from "./store.ts";
 export const VIEW = 128_000;
 
 const flat = (text: string): string => text.replace(/\s*\n\s*/g, " ");
+const PLACEHOLDER_BYTES = bytes(PLACEHOLDER);
+const SAVE_MS = 1000;
 
 export class View {
 	parts: Part[] = [];
@@ -22,6 +25,9 @@ export class View {
 	readonly #budget: number;
 	/** Texts of built parts; nodes never change, so they are cached for good. */
 	readonly #texts = new Map<string, string>();
+	/** Byte sizes of the cached texts. */
+	readonly #sizes = new Map<string, number>();
+	#saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(tree: Tree, log: Log, store: MemoryStore, budget = VIEW) {
 		this.#tree = tree;
@@ -40,17 +46,25 @@ export class View {
 	}
 
 	built(part: Part): boolean {
-		return this.#text(part) !== undefined;
+		return this.#tree.has(part.l, part.i);
 	}
 
 	#text(part: Part): string | undefined {
 		const key = `${part.l}:${part.i}`;
 		let text = this.#texts.get(key);
-		if (text === undefined) {
+		if (text === undefined && this.#tree.has(part.l, part.i)) {
 			text = this.#tree.get(part.l, part.i)?.text;
-			if (text !== undefined) this.#texts.set(key, text);
+			if (text !== undefined) {
+				this.#texts.set(key, text);
+				this.#sizes.set(key, bytes(text));
+			}
 		}
 		return text;
+	}
+
+	/** Bytes of a part's line. */
+	#bytes(part: Part): number {
+		return this.#text(part) === undefined ? PLACEHOLDER_BYTES : this.#sizes.get(`${part.l}:${part.i}`)!;
 	}
 
 	text(part: Part): string {
@@ -67,7 +81,7 @@ export class View {
 	fit(): void {
 		const T = this.#log.length;
 		let size = 0;
-		for (const part of this.parts) size += bytes(this.text(part));
+		for (const part of this.parts) size += this.#bytes(part);
 		while (size > this.#budget) {
 			let best = -1;
 			let bestDue = -Infinity;
@@ -86,11 +100,21 @@ export class View {
 			const a = this.parts[best]!;
 			const b = this.parts[best + 1]!;
 			const parent = { l: a.l + 1, i: a.i / 2 };
-			size += bytes(this.text(parent)) - bytes(this.text(a)) - bytes(this.text(b));
+			size += this.#bytes(parent) - this.#bytes(a) - this.#bytes(b);
 			this.parts.splice(best, 2, parent);
-			this.#texts.delete(`${a.l}:${a.i}`);
-			this.#texts.delete(`${b.l}:${b.i}`);
+			for (const gone of [a, b]) {
+				this.#texts.delete(`${gone.l}:${gone.i}`);
+				this.#sizes.delete(`${gone.l}:${gone.i}`);
+			}
 		}
+		this.#saveTimer ??= setTimeout(() => this.flush(), SAVE_MS);
+		(this.#saveTimer as { unref?: () => void }).unref?.();
+	}
+
+	/** Save the parts now (a pending save, or on close). */
+	flush(): void {
+		clearTimeout(this.#saveTimer);
+		this.#saveTimer = undefined;
 		const last = this.parts.at(-1);
 		this.#store.viewSave(this.parts, last === undefined ? 0 : end(last.l, last.i));
 	}
@@ -108,7 +132,7 @@ export class View {
 	/** Bytes of the rendered lines. */
 	size(): number {
 		let size = 0;
-		for (const part of this.parts) size += bytes(this.text(part));
+		for (const part of this.parts) size += this.#bytes(part);
 		return size;
 	}
 

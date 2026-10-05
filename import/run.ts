@@ -154,7 +154,14 @@ async function build(): Promise<void> {
 
 	mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 	const store = new NodeSqliteStore(dbPath);
-	const planned = rows(collect().sessions, limit);
+	// The plan is frozen at the first build: sessions still in use keep growing, and a resume must see the same rows.
+	const cutoff = Number(store.meta("cutoff") ?? Date.now());
+	if (store.meta("cutoff") === undefined) store.setMeta("cutoff", String(cutoff));
+	const frozen = collect().sessions.flatMap((session) => {
+		const messages = session.messages.filter((message) => message.date <= cutoff);
+		return messages.length === 0 ? [] : [{ ...session, messages }];
+	});
+	const planned = rows(frozen, limit);
 	const have = store.logLength();
 	if (have > planned.rows.length) throw new Error(`${dbPath} already holds ${have} rows, more than this --limit plans (${planned.rows.length}).`);
 	// The rows already stored must be the same ones (same order); then the rest is appended.
@@ -166,7 +173,7 @@ async function build(): Promise<void> {
 		if (event.type === "failed") console.log(`  ! ${event.l}:${event.i} ${event.error.message.slice(0, 160)}`);
 	});
 	const fresh = planned.rows.slice(have).map((row) => ({ ...row, size: bytes(`${row.kind}: ${row.text}`) }));
-	console.log(`${spec}: ${have} rows stored, appending ${fresh.length} (${planned.sessions} sessions); secrets redacted ${JSON.stringify(planned.hits)}`);
+	console.log(`${spec}: history up to ${when(cutoff)}; ${have} rows stored, appending ${fresh.length} (${planned.sessions} sessions); secrets redacted ${JSON.stringify(planned.hits)}`);
 	for (let at = 0; at < fresh.length; at += 2000) memory.log.append(fresh.slice(at, at + 2000));
 	memory.pump();
 

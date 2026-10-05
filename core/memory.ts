@@ -90,6 +90,7 @@ export class Memory {
 	}
 
 	close(): void {
+		this.view.flush();
 		this.#closed = true;
 		for (const wake of this.#waiters) wake();
 	}
