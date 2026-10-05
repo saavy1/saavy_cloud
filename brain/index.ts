@@ -13,6 +13,8 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
+import { type AuthEnv, getAuth, signedIn } from "../auth/auth.ts";
+import { DEVICE_PAGE } from "../auth/device.ts";
 import { glance } from "../core/glance.ts";
 import { Memory } from "../core/memory.ts";
 import type { MemoryStats, MsgInfo, NodeInfo, Phase } from "../core/protocol.ts";
@@ -30,11 +32,12 @@ import { Turns } from "./turns.ts";
 // The facet class the codemode runtime spawns; exported from the entry so it is on ctx.exports.
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
-interface Env {
+interface Env extends AuthEnv {
 	Brain: DurableObjectNamespace<Brain>;
 	AI: Ai;
-	SAAVY_TOKEN: string;
 	LOADER: WorkerLoader;
+	/** The spike's shared token, accepted until every device has signed in; unset to retire it. */
+	SAAVY_TOKEN?: string;
 }
 
 const context = BACKGROUND_CONTEXT;
@@ -540,16 +543,32 @@ export class Brain extends DurableObject<Env> {
 	}
 }
 
-function authorized(request: Request, env: Env): boolean {
+/** Equal strings, compared in time that does not depend on where they differ. */
+function same(a: string, b: string): boolean {
+	const x = new TextEncoder().encode(a);
+	const y = new TextEncoder().encode(b);
+	let diff = x.length ^ y.length;
+	for (let n = 0; n < Math.max(x.length, y.length); n++) diff |= (x[n] ?? 0) ^ (y[n] ?? 0);
+	return diff === 0;
+}
+
+/** Who is calling: a signed-in device (bearer session token or cookie), or the legacy shared token while it lasts. */
+async function caller(request: Request, env: Env): Promise<string | undefined> {
 	const url = new URL(request.url);
-	const token = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? url.searchParams.get("token");
-	return token !== null && token !== undefined && env.SAAVY_TOKEN !== undefined && token === env.SAAVY_TOKEN;
+	const legacy = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? url.searchParams.get("token");
+	if (env.SAAVY_TOKEN && legacy && same(legacy, env.SAAVY_TOKEN)) return "legacy token";
+	return (await signedIn(env, request.headers))?.name;
 }
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
-		if (!authorized(request, env)) return new Response("unauthorized", { status: 401 });
+		// Signing in is the one thing open to everyone (rate limited, and only allowlisted GitHub accounts get through).
+		if (url.pathname.startsWith("/api/auth/")) return getAuth(env).auth.handler(request);
+		if (url.pathname === "/device") return new Response(DEVICE_PAGE, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+		const who = await caller(request, env);
+		if (who === undefined) return Response.json({ error: "Sign in first: saavy auth login" }, { status: 401 });
+		if (url.pathname === "/api/me") return Response.json({ name: who });
 		const brain = env.Brain.get(env.Brain.idFromName("main"));
 		const body = async <T>() => (await request.json()) as T;
 		const post = request.method === "POST";

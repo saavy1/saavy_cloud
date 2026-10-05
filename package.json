@@ -7,7 +7,9 @@
     "deploy": "cf deploy",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "test": "node --test test/*.test.ts",
-    "runner": "node runner/runner.ts"
+    "runner": "node runner/runner.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "cf d1 migrations apply 015bf88a-046b-492e-9bda-16cdf321aacc"
   },
   "dependencies": {
     "@cloudflare/codemode": "^0.5.3",
@@ -16,12 +18,15 @@
     "@earendil-works/pi-coding-agent": "^1.0.2",
     "@earendil-works/pi-durable": "^1.0.2",
     "@earendil-works/pi-tui": "^1.0.2",
-    "agents": "^0.26.0"
+    "agents": "^0.26.0",
+    "better-auth": "^1.6.25",
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261004.1",
     "@types/node": "^26.6.4",
     "cf": "^1.0.0-beta.12",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^7.0.2",
     "wrangler": "^4.147.0"
   }

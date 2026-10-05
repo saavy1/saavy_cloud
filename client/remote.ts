@@ -148,8 +148,11 @@ export class RemoteSaavy {
 	#connected: Promise<void>;
 	#onConnected: () => void = () => {};
 
-	private constructor(url: string, home: string) {
+	readonly #token: string;
+
+	private constructor(url: string, token: string, home: string) {
 		this.#url = url;
+		this.#token = token;
 		this.home = home;
 		this.#connected = new Promise((resolve) => {
 			this.#onConnected = resolve;
@@ -158,8 +161,8 @@ export class RemoteSaavy {
 
 	/** Connect to the brain at `base` (https://… or http://…) with `token`; resolves once the first hello is in. */
 	static async connect(base: string, token: string, home: string): Promise<RemoteSaavy> {
-		const url = `${base.replace(/^http/, "ws").replace(/\/$/, "")}/ws/client?token=${encodeURIComponent(token)}`;
-		const brain = new RemoteSaavy(url, home);
+		const url = `${base.replace(/^http/, "ws").replace(/\/$/, "")}/ws/client`;
+		const brain = new RemoteSaavy(url, token, home);
 		brain.#open();
 		await brain.#connected;
 		brain.models.set(await brain.call<Model<Api>[]>("models"));
@@ -167,7 +170,8 @@ export class RemoteSaavy {
 	}
 
 	#open(): void {
-		const socket = new WebSocket(this.#url);
+		// The token rides in a header, never in the URL (Node's WebSocket takes headers).
+		const socket = new WebSocket(this.#url, { headers: { authorization: `Bearer ${this.#token}` } } as unknown as string[]);
 		this.#socket = socket;
 		socket.addEventListener("open", () => {
 			this.#attempt = 0;

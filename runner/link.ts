@@ -46,7 +46,7 @@ function toWire(result: { ok: boolean; value?: unknown; error?: unknown }): Wire
 
 /** Keep a runner connected until stop(). */
 export function startRunner(options: RunnerOptions): { stop(): void; readonly connected: boolean } {
-	const url = `${options.url.replace(/^http/, "ws").replace(/\/$/, "")}/ws/runner?token=${encodeURIComponent(options.token)}`;
+	const url = `${options.url.replace(/^http/, "ws").replace(/\/$/, "")}/ws/runner`;
 	const log = options.log ?? (() => {});
 	let stopped = false;
 	let current: WebSocket | undefined;
@@ -55,7 +55,8 @@ export function startRunner(options: RunnerOptions): { stop(): void; readonly co
 	mkdirSync(dirname(cachePath), { recursive: true, mode: 0o700 });
 	const cache = new ResultCache(cachePath);
 	const connect = (): void => {
-		const socket = new WebSocket(url);
+		// The token rides in a header, never in the URL (Node's WebSocket takes headers).
+		const socket = new WebSocket(url, { headers: { authorization: `Bearer ${options.token}` } } as unknown as string[]);
 		current = socket;
 		const running = new Map<string, AbortController>();
 		const keyedRunning = new Map<string, AbortController>();

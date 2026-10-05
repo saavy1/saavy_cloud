@@ -14,6 +14,7 @@
   "include": [
     "core",
     "brain",
+    "auth",
     "cloudflare.config.ts"
   ]
 }
