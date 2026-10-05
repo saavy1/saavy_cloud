@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["src", "cloudflare.config.ts"]
+  "include": ["core", "brain", "cloudflare.config.ts"]
 }

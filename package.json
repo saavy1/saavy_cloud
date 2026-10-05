@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "cf dev",
     "deploy": "cf deploy",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "runner": "node runner/runner.ts"
   },
   "dependencies": {
     "@cloudflare/codemode": "^0.5.3",

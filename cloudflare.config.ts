@@ -1,5 +1,5 @@
 import { bindings, defineConfig, exports } from "cf/config";
-import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
+import * as entrypoint from "./brain/index.ts" with { type: "cf-worker" };
 
 export default defineConfig({
 	worker: {
