@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# A saavy panel pane (opened by saavy with `tern split`), with the project's pinned Node.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec direnv exec "$here" node "$here/client/panel.ts" "$@"

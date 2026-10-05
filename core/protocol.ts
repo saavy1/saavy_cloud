@@ -70,3 +70,50 @@ export function decodeValue(value: unknown): unknown {
 	}
 	return value;
 }
+
+// The brain ⇄ client wire (front ends: Tern, pi-tui), JSON text frames over /ws/client.
+//
+//   client → brain   { t: "call", id, method, args }      one RPC (see ClientMethods in brain/clients.ts)
+//   brain → client   { t: "reply", id, ok, value | error }
+//                    { t: "entry", entry }                a committed entry of the main conversation
+//                    { t: "view", docs, last }            pi's live docs (agent, usage, live), and the newest entry id
+//                    { t: "phase", phase }                idle | settling | running
+//                    { t: "memory", stats }               memory counters changed
+//                    { t: "notice", level, message }
+
+export type Phase = "idle" | "settling" | "running";
+
+export interface MemoryStats {
+	readonly messages: number;
+	readonly summaries: number;
+	readonly viewBytes: number;
+	readonly viewLines: number;
+	readonly depth: number;
+	readonly unbuilt: number;
+	readonly compacting: number;
+}
+
+/** A tree node or message as the explorer shows it. */
+export interface NodeInfo {
+	readonly l: number;
+	readonly i: number;
+	readonly text: string | null;
+}
+
+export interface MsgInfo {
+	readonly i: number;
+	readonly kind: string;
+	readonly text: string;
+	readonly date: number;
+}
+
+export type ClientFrame = { readonly t: "call"; readonly id: number; readonly method: string; readonly args: unknown[] };
+
+export type ServerFrame =
+	| { readonly t: "reply"; readonly id: number; readonly ok: true; readonly value: unknown }
+	| { readonly t: "reply"; readonly id: number; readonly ok: false; readonly error: string }
+	| { readonly t: "entry"; readonly entry: unknown }
+	| { readonly t: "view"; readonly docs: Record<string, unknown>; readonly last: unknown }
+	| { readonly t: "phase"; readonly phase: Phase }
+	| { readonly t: "memory"; readonly stats: MemoryStats }
+	| { readonly t: "notice"; readonly level: "info" | "warning" | "error"; readonly message: string };

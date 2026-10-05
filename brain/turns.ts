@@ -63,6 +63,14 @@ export class Turns extends LifecycleCapability {
 		return rows.length === 0 ? undefined : String(rows[0]!.operation);
 	}
 
+	/** Take every waiting message out of the inbox (an abort before the turn started); their texts. */
+	drain(): string[] {
+		const items = this.#items();
+		this.#sql.exec("DELETE FROM saavy_inbox");
+		this.#settleSince = undefined;
+		return items.map((item) => item.text);
+	}
+
 	queued(): number {
 		return Number(this.#sql.exec("SELECT COUNT(*) AS n FROM saavy_inbox").one().n);
 	}

@@ -7,13 +7,16 @@ import { createCodemodeRuntime, DynamicWorkerExecutor, type CodemodeRuntimeHandl
 import { type Api, clampThinkingLevel, type Model, Type } from "@earendil-works/pi-ai";
 import { createModels, type Models, type Provider } from "@earendil-works/pi-ai/models";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
-import { type Conversation, createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
+import { AgentDoc, type Conversation, createRegistry, defineExtension, defineTool, Harness, type ModelRef, UserEntry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
+import { glance } from "../core/glance.ts";
 import { Memory } from "../core/memory.ts";
+import type { MemoryStats, MsgInfo, NodeInfo, Phase } from "../core/protocol.ts";
+import { CLIENT_TAG, Clients } from "./clients.ts";
 import { type Config, ConfigStore, modelRef, ROUTING } from "./config.ts";
 import { DesktopConnector } from "./desktop.codemode.ts";
 import { RemoteEnv } from "./env.ts";
@@ -75,7 +78,9 @@ export class Brain extends DurableObject<Env> {
 			await this.#catchUp(root);
 			pi.subscribeCommits((publication) => {
 				for (const change of publication.changes) {
-					if (change.type === "entry" && change.value.conversationId === root.id) this.memory.log.add(change.value);
+					if (change.type !== "entry" || change.value.conversationId !== root.id) continue;
+					this.memory.log.add(change.value);
+					this.clients.broadcast({ t: "entry", entry: change.value });
 				}
 			});
 			return pi;
@@ -84,13 +89,26 @@ export class Brain extends DurableObject<Env> {
 
 	readonly turns = new Turns(this.ctx.storage.sql, () => ({ memory: this.memory, harness: this.harness, root: () => this.root(), context }));
 
+	readonly clients = new Clients(() => this.ctx.getWebSockets(CLIENT_TAG), this.#clientMethods());
+
 	readonly webSockets = new WebSockets({
-		// The runner speaks only its own JSON frames; no agents protocol frames on its socket.
-		protocol: (_connection, ctx) => new URL(ctx.request.url).pathname !== "/ws/runner",
-		getConnectionTags: (_connection, ctx) => (new URL(ctx.request.url).pathname === "/ws/runner" ? [RUNNER_TAG] : []),
+		// Runners and front ends speak saavy's own JSON frames; no agents protocol frames on their sockets.
+		protocol: false,
+		getConnectionTags: (_connection, ctx) => {
+			const path = new URL(ctx.request.url).pathname;
+			return path === "/ws/runner" ? [RUNNER_TAG] : path === "/ws/client" ? [CLIENT_TAG] : [];
+		},
 		handlers: {
+			onConnect: (connection) => {
+				if (connection.tags.includes(CLIENT_TAG)) void this.#follow();
+			},
 			onMessage: (connection, message) => {
-				if (typeof message === "string" && connection.tags.includes(RUNNER_TAG)) this.runners.receive(message);
+				if (typeof message !== "string") return;
+				if (connection.tags.includes(RUNNER_TAG)) this.runners.receive(message);
+				else if (connection.tags.includes(CLIENT_TAG)) {
+					void this.#follow();
+					void this.clients.receive(connection as unknown as WebSocket, message);
+				}
 			},
 		},
 	});
@@ -102,8 +120,163 @@ export class Brain extends DurableObject<Env> {
 		// Every new message may make summaries buildable; the compactor job keeps the brain awake while they are.
 		this.memory.log.subscribe(() => void this.turns.compact());
 		this.memory.subscribe((event) => {
-			if (event.type === "failed") console.warn(`summary ${event.l}:${event.i} failed: ${event.error.message}`);
+			if (event.type === "failed") {
+				console.warn(`summary ${event.l}:${event.i} failed: ${event.error.message}`);
+				this.clients.broadcast({ t: "notice", level: "warning", message: `summary ${event.l}:${event.i}: ${event.error.message}` });
+			}
+			this.#statsChanged();
 		});
+		this.memory.log.subscribe(() => this.#statsChanged());
+		// Front ends still connected across a hibernation get their live feed back.
+		if (this.clients.count > 0) void this.#follow();
+	}
+
+	// ─── Front ends ───
+
+	#following: Promise<void> | undefined;
+	#phase: Phase = "idle";
+	#live: Record<string, unknown> | undefined;
+	/** The newest live frame, for a front end that just connected. */
+	#viewFrame: { docs: Record<string, unknown>; last: unknown } | undefined;
+	#viewTimer: ReturnType<typeof setTimeout> | undefined;
+	#statsTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/** Follow pi's live view of the main conversation while front ends are connected. */
+	#follow(): Promise<void> {
+		this.#following ??= (async () => {
+			const view = await (await this.root()).viewState(context);
+			let latest = view.value;
+			const send = () => {
+				this.#viewTimer = undefined;
+				const docs = latest.docs;
+				this.#live = docs["pi.live"];
+				this.#viewFrame = { docs: { "pi.agent": docs["pi.agent"], "pi.usage": docs["pi.usage"], "pi.live": docs["pi.live"] }, last: latest.entries.at(-1)?.id ?? null };
+				this.clients.broadcast({ t: "view", ...this.#viewFrame });
+				this.#updatePhase();
+			};
+			send();
+			view.subscribe((value) => {
+				latest = value;
+				if (this.clients.count === 0) return;
+				// Partials commit often; a front end needs ten frames a second at most.
+				this.#viewTimer ??= setTimeout(send, 100);
+			});
+		})().catch((error: unknown) => {
+			this.#following = undefined;
+			console.warn("following the view failed", error);
+		});
+		return this.#following;
+	}
+
+	/** running while pi has a run, settling while messages wait in the inbox, else idle. */
+	#updatePhase(): void {
+		const phase: Phase = this.#live?.run !== undefined ? "running" : this.turns.queued() > 0 ? "settling" : "idle";
+		if (phase === this.#phase) return;
+		this.#phase = phase;
+		this.clients.broadcast({ t: "phase", phase });
+	}
+
+	#stats(): MemoryStats {
+		const view = this.memory.view;
+		return {
+			messages: this.memory.log.length,
+			summaries: this.memory.tree.size,
+			viewBytes: view.size(),
+			viewLines: view.parts.length,
+			depth: Math.max(0, ...view.parts.map((part) => part.l)),
+			unbuilt: view.unbuilt(),
+			compacting: this.memory.running,
+		};
+	}
+
+	#statsChanged(): void {
+		if (this.clients.count === 0) return;
+		this.#statsTimer ??= setTimeout(() => {
+			this.#statsTimer = undefined;
+			this.clients.broadcast({ t: "memory", stats: this.#stats() });
+		}, 300);
+	}
+
+	/** What front ends may call. */
+	#clientMethods() {
+		const pi = () => this.harness.pi();
+		return {
+			hello: async () => {
+				await this.#follow();
+				return { phase: this.#phase, stats: this.#stats(), config: { ...this.settings.get(), cwd: this.cwd() }, runners: this.runners.count, view: this.#viewFrame ?? null };
+			},
+			recentEntries: async (limit: number) => [...(await (await this.root()).entries({}, Math.min(limit, 500), undefined, context)).items].reverse(),
+			send: async (text: string) => {
+				const id = await this.turns.enqueue(text);
+				this.#updatePhase();
+				return id;
+			},
+			abort: async () => this.#abort(),
+			note: async (text: string) => this.#note(text),
+			agent: async () => (await pi()).snapshot(AgentDoc, (await this.root()).id, context),
+			models: async () => [...this.models.getModels("cloudflare"), ...this.models.getModels("openrouter")],
+			setModel: async (ref: ModelRef) => this.#thinkingFor((await this.configure({ model: `${ref.provider}/${ref.modelId}` })).thinking),
+			setThinking: async (level: Config["thinking"]) => this.#thinkingFor((await this.configure({ thinking: level })).thinking),
+			setCwd: async (dir: string) => this.#setCwd(dir),
+			setCompactor: async (model: string | undefined, thinking?: Config["compactor"]["thinking"]) => {
+				const current = this.settings.get().compactor;
+				return this.settings.set({ compactor: { model: model ?? current.model, thinking: thinking ?? current.thinking } }).compactor;
+			},
+			config: async () => ({ ...this.settings.get(), cwd: this.cwd() }),
+			usage: async () => (await pi()).usage(context),
+			stats: async () => this.#stats(),
+			view: async () => this.memory.view.render(),
+			parts: async () => this.memory.view.parts,
+			zoom: async (id: number, n: number) => this.memory.zoom(id, n),
+			search: async (query: string) => this.memory.search(query),
+			date: async (id: number) => this.memory.date(id),
+			glance: async (offsetMinutes: number) => glance(this.memory, offsetMinutes),
+			nodes: async (list: { l: number; i: number }[]): Promise<NodeInfo[]> => list.slice(0, 2000).map(({ l, i }) => ({ l, i, text: this.memory.tree.get(l, i)?.text ?? null })),
+			msgs: async (list: number[]): Promise<MsgInfo[]> =>
+				list.slice(0, 2000).flatMap((i) => {
+					const message = this.memory.log.at(i);
+					return message === undefined ? [] : [{ i, kind: message.kind, text: message.text, date: message.date }];
+				}),
+		};
+	}
+
+	/** The level the main model really runs at for `level`. */
+	#thinkingFor(level: Config["thinking"]): string {
+		const ref = modelRef(this.settings.get().model);
+		const model = this.models.getModel(ref.provider, ref.modelId);
+		return model === undefined ? level : clampThinkingLevel(model, level);
+	}
+
+	/** Stop the running call; messages still waiting for summaries are logged unanswered (spec §6). */
+	async #abort(): Promise<void> {
+		const waiting = this.turns.drain();
+		for (const text of waiting) await this.#note(text);
+		if (this.#live?.run !== undefined) await this.harness.abort();
+		this.#updatePhase();
+	}
+
+	/** Put a message in the log without starting a turn. */
+	async #note(text: string): Promise<void> {
+		const entry = { kind: UserEntry.kind, model: [{ role: "user" as const, content: text, timestamp: Date.now() }] };
+		await (await this.root()).submit({ type: "write", entry }, context);
+	}
+
+	async #setCwd(dir: string): Promise<string> {
+		const home = this.store.runnerHome() ?? "/";
+		const base = this.cwd();
+		const expanded = dir.replace(/^~(?=$|\/)/, home);
+		const parts = (expanded.startsWith("/") ? expanded : `${base}/${expanded}`).split("/");
+		const out: string[] = [];
+		for (const part of parts) {
+			if (part === "" || part === ".") continue;
+			if (part === "..") out.pop();
+			else out.push(part);
+		}
+		const cwd = `/${out.join("/")}`;
+		const exists = await this.desktop(cwd).fileInfo(cwd, context);
+		if (!exists.ok || exists.value.kind !== "directory") throw new Error(`No directory ${cwd} on the desktop`);
+		await this.configure({ cwd });
+		return cwd;
 	}
 
 	/** The working directory: the one the user set, else the runner's home. */
@@ -269,6 +442,7 @@ export default {
 		try {
 			switch (url.pathname) {
 				case "/ws/runner":
+				case "/ws/client":
 					return brain.fetch(request);
 				case "/api/status":
 					return Response.json(await brain.status());

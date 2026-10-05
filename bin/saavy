@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# saavy on Cloudflare: the front end (and this desktop's runner) for the brain.
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+exec direnv exec "$here" node "$here/client/main.ts" "$@"
