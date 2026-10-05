@@ -25,8 +25,6 @@ export default defineConfig({
 			BETTER_AUTH_SECRET: bindings.secret(),
 			GITHUB_CLIENT_ID: bindings.secret(),
 			GITHUB_CLIENT_SECRET: bindings.secret(),
-			// The spike's shared token: still accepted until every device has signed in, then removed.
-			SAAVY_TOKEN: bindings.secret(),
 		},
 		observability: { enabled: true },
 	},

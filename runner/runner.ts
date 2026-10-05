@@ -8,12 +8,8 @@ import { join } from "node:path";
 import { credentialsPath, readCredentials } from "../client/auth.ts";
 import { startRunner } from "./link.ts";
 
-const { url, token } = readCredentials();
-if (token === undefined) {
-	console.error(`runner: not signed in (${credentialsPath()}); run: saavy auth login`);
-	process.exit(2);
-}
+if (readCredentials().token === undefined) console.error(`runner: not signed in (${credentialsPath()}); run: saavy auth login. Waiting for it.`);
 // Front ends on this machine see this and leave the tools to it.
 mkdirSync(join(homedir(), ".saavy"), { recursive: true, mode: 0o700 });
 writeFileSync(join(homedir(), ".saavy", "runner.pid"), `${process.pid}\n`);
-startRunner({ url: url.replace(/\/ws\/runner$/, ""), token, log: (line) => console.log(line) });
+startRunner({ credentials: readCredentials, log: (line) => console.log(line) });

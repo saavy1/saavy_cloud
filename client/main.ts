@@ -34,7 +34,7 @@ function standaloneRunner(): boolean {
 	}
 }
 
-const runner = process.argv.includes("--no-runner") || standaloneRunner() ? undefined : startRunner({ url, token });
+const runner = process.argv.includes("--no-runner") || standaloneRunner() ? undefined : startRunner({ credentials: readCredentials });
 
 let saavy: RemoteSaavy;
 try {

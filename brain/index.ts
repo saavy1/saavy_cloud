@@ -36,8 +36,6 @@ interface Env extends AuthEnv {
 	Brain: DurableObjectNamespace<Brain>;
 	AI: Ai;
 	LOADER: WorkerLoader;
-	/** The spike's shared token, accepted until every device has signed in; unset to retire it. */
-	SAAVY_TOKEN?: string;
 }
 
 const context = BACKGROUND_CONTEXT;
@@ -543,20 +541,8 @@ export class Brain extends DurableObject<Env> {
 	}
 }
 
-/** Equal strings, compared in time that does not depend on where they differ. */
-function same(a: string, b: string): boolean {
-	const x = new TextEncoder().encode(a);
-	const y = new TextEncoder().encode(b);
-	let diff = x.length ^ y.length;
-	for (let n = 0; n < Math.max(x.length, y.length); n++) diff |= (x[n] ?? 0) ^ (y[n] ?? 0);
-	return diff === 0;
-}
-
-/** Who is calling: a signed-in device (bearer session token or cookie), or the legacy shared token while it lasts. */
+/** Who is calling: a signed-in device (bearer session token, or the session cookie in a browser). */
 async function caller(request: Request, env: Env): Promise<string | undefined> {
-	const url = new URL(request.url);
-	const legacy = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? url.searchParams.get("token");
-	if (env.SAAVY_TOKEN && legacy && same(legacy, env.SAAVY_TOKEN)) return "legacy token";
 	return (await signedIn(env, request.headers))?.name;
 }
 

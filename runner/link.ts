@@ -13,9 +13,11 @@ import { type Outcome, ResultCache } from "./cache.ts";
 const RECONNECT_MS = 2000;
 
 export interface RunnerOptions {
-	/** The brain's base URL (https://… or http://…). */
-	readonly url: string;
-	readonly token: string;
+	/**
+	 * The brain's base URL (https://… or http://…) and this device's token, read at every (re)connect: a new sign-in
+	 * or address applies without a restart.
+	 */
+	readonly credentials: () => { readonly url: string; readonly token?: string };
 	/** Where to say what it does; silent by default (a front end owns the terminal). */
 	readonly log?: (line: string) => void;
 	/** Results of keyed calls, kept so a call the brain repeats after an eviction is not run twice. */
@@ -46,7 +48,6 @@ function toWire(result: { ok: boolean; value?: unknown; error?: unknown }): Wire
 
 /** Keep a runner connected until stop(). */
 export function startRunner(options: RunnerOptions): { stop(): void; readonly connected: boolean } {
-	const url = `${options.url.replace(/^http/, "ws").replace(/\/$/, "")}/ws/runner`;
 	const log = options.log ?? (() => {});
 	let stopped = false;
 	let current: WebSocket | undefined;
@@ -54,9 +55,19 @@ export function startRunner(options: RunnerOptions): { stop(): void; readonly co
 	const cachePath = options.cachePath ?? join(homedir(), ".saavy", "runner-cache.jsonl");
 	mkdirSync(dirname(cachePath), { recursive: true, mode: 0o700 });
 	const cache = new ResultCache(cachePath);
+	let warned = "";
 	const connect = (): void => {
+		const { url: base, token } = options.credentials();
+		if (token === undefined) {
+			if (warned !== "signin") log("not signed in; run: saavy auth login (retrying)");
+			warned = "signin";
+			setTimeout(connect, RECONNECT_MS * 5);
+			return;
+		}
+		warned = "";
+		const url = `${base.replace(/^http/, "ws").replace(/\/$/, "").replace(/\/ws\/runner$/, "")}/ws/runner`;
 		// The token rides in a header, never in the URL (Node's WebSocket takes headers).
-		const socket = new WebSocket(url, { headers: { authorization: `Bearer ${options.token}` } } as unknown as string[]);
+		const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } } as unknown as string[]);
 		current = socket;
 		const running = new Map<string, AbortController>();
 		const keyedRunning = new Map<string, AbortController>();
