@@ -15,6 +15,7 @@
     "client",
     "runner",
     "core",
-    "test"
+    "test",
+    "import"
   ]
 }
