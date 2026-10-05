@@ -1,5 +1,5 @@
 // saavy, the front end: connects to the brain on Cloudflare, runs the desktop runner while it is open (so the agent's
-// tools act on this machine), and draws the chat natively in Tern.
+// tools act on this machine), and draws the chat: natively in Tern, with pi-tui in any other terminal.
 //
 //   SAAVY_URL=https://… SAAVY_TOKEN=… node client/main.ts      (or ~/.config/saavy/cloud.json: { "url", "token" })
 //   --no-runner   draw only; another runner (or none) serves the tools
@@ -39,11 +39,13 @@ try {
 
 try {
 	const shake = tspWanted() ? await handshake(["edit"]) : undefined;
-	if (shake?.hello === undefined) {
-		console.error("saavy: the cloud front end draws in Tern for now; run it in a Tern pane.");
-	} else {
+	// In Tern, draw natively over the Tern Surface Protocol; elsewhere (or if the handshake fails), pi-tui.
+	if (shake?.hello !== undefined) {
 		const { runTsp } = await import("./tsp/app.ts");
 		await runTsp(saavy, shake);
+	} else {
+		const { runTui } = await import("./tui.ts");
+		await runTui(saavy);
 	}
 } finally {
 	if (saavy.phase !== "idle") console.log("The brain keeps working; reopen saavy to follow along.");
