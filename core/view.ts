@@ -148,7 +148,17 @@ export class View {
 	 */
 	context(limit: number): string {
 		// Only summaries: in order there are no gaps, and a node started ahead of order skips the lines still pending.
-		const lines = this.parts.filter((part) => end(part.l, part.i) <= limit && this.built(part)).map((part) => flat(this.text(part)));
+		// At most the view's budget, newest kept: while folding lags (a bulk build), the lines before a node can run long.
+		const lines: string[] = [];
+		let size = 0;
+		for (let n = this.parts.length - 1; n >= 0; n--) {
+			const part = this.parts[n]!;
+			if (end(part.l, part.i) > limit || !this.built(part)) continue;
+			size += this.#bytes(part);
+			if (size > this.#budget) break;
+			lines.push(flat(this.text(part)));
+		}
+		lines.reverse();
 		return `<chat>\n${lines.map((line) => `${line}\n`).join("")}</chat>`;
 	}
 }

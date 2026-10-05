@@ -218,18 +218,25 @@ export class Memory {
 		if (this.#compactor.driven === true && !this.#driving) return;
 		const T = this.log.length;
 		const first = this.view.first();
+		const jobs = this.#compactor.jobs ?? JOBS;
+		// Running ahead, single-message summaries could take every slot and starve the merges that fold old lines
+		// (keeping each call's context small): they get half the slots then.
+		const leafSlots = (this.#compactor.lookahead ?? 0) > 0 ? Math.max(1, Math.floor(jobs / 2)) : jobs;
+		let leaves = [...this.#busy].filter((id) => id.startsWith("0:")).length;
 		for (let l = 0; 2 ** l <= T; l++) {
 			let f = this.#frontier[l] ?? 0;
 			while (end(l, f) <= T && this.tree.has(l, f)) f++;
 			this.#frontier[l] = f;
 			for (let i = f; end(l, i) <= T; i++) {
-				if (this.#busy.size >= (this.#compactor.jobs ?? JOBS)) return;
+				if (this.#busy.size >= jobs) return;
+				if (l === 0 && leaves >= leafSlots) break;
 				const limit = l === 0 ? i : end(l, i);
 				if (limit > first + (this.#compactor.lookahead ?? 0)) break;
 				const id = nodeId(l, i);
 				if (this.tree.has(l, i) || this.#busy.has(id)) continue;
 				if (l > 0 && !(this.tree.has(l - 1, 2 * i) && this.tree.has(l - 1, 2 * i + 1))) continue;
 				this.#busy.add(id);
+				if (l === 0) leaves++;
 				this.#build(l, i).then(
 					() => {
 						this.#busy.delete(id);
