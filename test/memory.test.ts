@@ -202,3 +202,27 @@ test("a driven memory builds only inside drive(), which resolves once nothing is
 	assert.ok(memory.tree.has(2, 0));
 	memory.close();
 });
+
+test("with lookahead, level-0 summaries start ahead of order, and their context holds only summaries", async () => {
+	let inFlight = 0;
+	let peak = 0;
+	const contexts: string[] = [];
+	const models = {
+		streamSimple: (_model: unknown, context: { messages: Message[] }) => ({
+			result: async (): Promise<AssistantMessage> => {
+				inFlight++;
+				peak = Math.max(peak, inFlight);
+				contexts.push(stepOf(context.messages));
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				inFlight--;
+				return { role: "assistant", content: [{ type: "text", text: "summary" }], stopReason: "stop" } as AssistantMessage;
+			},
+		}),
+	} as unknown as Models;
+	const memory = new Memory(new MemStore(), { ...compactor(models), jobs: 8, lookahead: 16 });
+	for (let n = 0; n < 16; n++) memory.log.add(userEntry(`long ${n} ${"z".repeat(600)}`));
+	assert.equal(await memory.settle(), true);
+	assert.ok(peak > 1, `peak ${peak}`);
+	for (const context of contexts) assert.doesNotMatch(context, /not summarized yet/);
+	memory.close();
+});

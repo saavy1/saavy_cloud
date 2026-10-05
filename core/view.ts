@@ -123,7 +123,8 @@ export class View {
 	 * `limit` is the node's end; for a level-0 node, its own index.
 	 */
 	context(limit: number): string {
-		const lines = this.parts.filter((part) => end(part.l, part.i) <= limit).map((part) => flat(this.text(part)));
+		// Only summaries: in order there are no gaps, and a node started ahead of order skips the lines still pending.
+		const lines = this.parts.filter((part) => end(part.l, part.i) <= limit && this.built(part)).map((part) => flat(this.text(part)));
 		return `<chat>\n${lines.map((line) => `${line}\n`).join("")}</chat>`;
 	}
 }

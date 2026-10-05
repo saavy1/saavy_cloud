@@ -28,6 +28,18 @@ export interface Compactor {
 	 * commit listener dies, silently, when that event ends. The host drives memory from an event that awaits it.
 	 */
 	readonly driven?: boolean;
+	/**
+	 * Sent with every compactor call: providers route one session to one place, so its shared prefix stays cached
+	 * (OpenCode requires it).
+	 */
+	readonly sessionId?: string;
+	/** Compactor calls at once (default JOBS). */
+	readonly jobs?: number;
+	/**
+	 * How far (in messages) nodes may start ahead of the first line still unsummarized. 0, the default, is the spec's
+	 * order: each summary sees every one before it. A bulk import trades a little of that context for parallelism.
+	 */
+	readonly lookahead?: number;
 }
 
 export type MemoryEvent = { type: "built"; l: number; i: number } | { type: "failed"; l: number; i: number; error: Error };
@@ -210,9 +222,9 @@ export class Memory {
 			while (end(l, f) <= T && this.tree.has(l, f)) f++;
 			this.#frontier[l] = f;
 			for (let i = f; end(l, i) <= T; i++) {
-				if (this.#busy.size >= JOBS) return;
+				if (this.#busy.size >= (this.#compactor.jobs ?? JOBS)) return;
 				const limit = l === 0 ? i : end(l, i);
-				if (limit > first) break;
+				if (limit > first + (this.#compactor.lookahead ?? 0)) break;
 				const id = nodeId(l, i);
 				if (this.tree.has(l, i) || this.#busy.has(id)) continue;
 				if (l > 0 && !(this.tree.has(l - 1, 2 * i) && this.tree.has(l - 1, 2 * i + 1))) continue;
@@ -318,7 +330,9 @@ export class Memory {
 			timer = setTimeout(() => reject(timedOut), CALL_TIMEOUT_MS + 1000);
 			unref(timer);
 		});
-		const call = models.streamSimple(model, context, { signal, ...(thinking === "off" ? {} : { reasoning: thinking }) }).result();
+		const { sessionId } = this.#compactor;
+		const options = { signal, ...(thinking === "off" ? {} : { reasoning: thinking }), ...(sessionId === undefined ? {} : { sessionId }) };
+		const call = models.streamSimple(model, context, options).result();
 		const reply = await Promise.race([call, deadline]).finally(() => clearTimeout(timer));
 		if (signal.aborted) throw timedOut;
 		if (reply.stopReason === "error" || reply.stopReason === "aborted") {

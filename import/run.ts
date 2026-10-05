@@ -1,7 +1,7 @@
 // The import: past sessions into a memory, built locally with the same core as the brain, then uploaded.
 //
 //   node import/run.ts plan                         what would be imported (no model calls)
-//   node import/run.ts build [--limit N] [--model provider/id] [--db path]
+//   node import/run.ts build [--limit N] [--model provider/id] [--thinking level] [--jobs 32] [--lookahead 64] [--db path]
 //                                                   build the log and its summaries; resumable, and a larger --limit
 //                                                   later extends the same log (sessions keep their order)
 //   node import/run.ts samples [--db path]          summaries from each level, to judge their quality
@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
@@ -144,6 +144,8 @@ class Meter {
 async function build(): Promise<void> {
 	const limit = Number(arg("limit") ?? Number.POSITIVE_INFINITY);
 	const spec = arg("model") ?? "opencode-go/space-bunny-free";
+	// minimal, not off: "off" sends no reasoning setting, and a reasoning model then thinks at length by default.
+	const thinking = (arg("thinking") ?? "minimal") as ModelThinkingLevel | "off";
 	const slash = spec.indexOf("/");
 	const runtime = models();
 	const model = runtime.getModel(spec.slice(0, slash), spec.slice(slash + 1)) as Model<Api> | undefined;
@@ -159,7 +161,7 @@ async function build(): Promise<void> {
 	for (const probe of [0, have - 1]) if (have > 0 && store.logGet(probe)?.key !== planned.rows[probe]!.key) throw new Error(`${dbPath} was built from a different plan; use a fresh --db.`);
 
 	const meter = new Meter();
-	const memory = new Memory(store, { models: meter.wrap(runtime), current: () => ({ model, thinking: "off" }) });
+	const memory = new Memory(store, { models: meter.wrap(runtime), current: () => ({ model, thinking }), sessionId: `saavy-import-${store.meta("run") ?? "1"}`, jobs: Number(arg("jobs") ?? 32), lookahead: Number(arg("lookahead") ?? 64) });
 	memory.subscribe((event) => {
 		if (event.type === "failed") console.log(`  ! ${event.l}:${event.i} ${event.error.message.slice(0, 160)}`);
 	});
