@@ -32,6 +32,8 @@ export function withView(messages: readonly Message[], view: string): Message[] 
 export interface InstructionsCache {
 	get(): string | undefined;
 	set(text: string): void;
+	/** Whether a runner is connected now; without one the cached copy stands in at once. */
+	online(): boolean;
 }
 
 /**
@@ -39,7 +41,7 @@ export interface InstructionsCache {
  * on the desktop. When the runner is offline the last copy read stands in.
  */
 async function instructions(env: ExecutionEnv | undefined, cache: InstructionsCache, context: Context): Promise<string> {
-	if (env === undefined) return cache.get() ?? "The user has written no instructions file yet.";
+	if (env === undefined || !cache.online()) return cache.get() ?? "The user has written no instructions file yet.";
 	const dirs: string[] = [];
 	for (let dir: string | undefined = env.cwd; dir !== undefined; ) {
 		dirs.unshift(dir);

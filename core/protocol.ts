@@ -1,6 +1,7 @@
 // The brain ⇄ runner wire: JSON text frames over one WebSocket the runner dials.
 //
-//   brain → runner   { id, op: "env", cwd, method, args }   call one ExecutionEnv method on the runner's machine
+//   brain → runner   { id, op: "env", cwd, method, args, key? }   call one ExecutionEnv method on the runner's machine;
+//                                                          with a key, a repeat of that key gets the first result
 //                    { id, op: "cancel" }                   abort that call
 //   runner → brain   { hello: { host, platform, home } }   once, on connect
 //                    { id, output }                         shell output while an exec runs
@@ -46,7 +47,7 @@ export interface RunnerHello {
 }
 
 export type BrainFrame =
-	| { readonly id: string; readonly op: "env"; readonly cwd: string; readonly method: EnvMethod; readonly args: unknown[] }
+	| { readonly id: string; readonly op: "env"; readonly cwd: string; readonly method: EnvMethod; readonly args: unknown[]; readonly key?: string }
 	| { readonly id: string; readonly op: "cancel" };
 
 export type RunnerFrame = { readonly hello: RunnerHello } | { readonly id: string; readonly output: string } | { readonly id: string; readonly result: WireResult };

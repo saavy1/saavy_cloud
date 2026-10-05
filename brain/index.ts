@@ -21,6 +21,7 @@ import { type Config, ConfigStore, modelRef, ROUTING } from "./config.ts";
 import { DesktopConnector } from "./desktop.codemode.ts";
 import { RemoteEnv } from "./env.ts";
 import { createExtensions } from "./extension.ts";
+import { desktopReplay } from "./replay.ts";
 import { RUNNER_TAG, Runners } from "./runners.ts";
 import { SqlMemoryStore } from "./store.ts";
 import { Turns } from "./turns.ts";
@@ -63,7 +64,12 @@ export class Brain extends DurableObject<Env> {
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
 			const registry = createRegistry();
-			const extensions = [CodingTools, ...createExtensions(() => this.memory, this.store.instructions), this.#codemodeExtension()];
+			const extensions = [
+				CodingTools,
+				desktopReplay(CodingTools.tools ?? []),
+				...createExtensions(() => this.memory, { ...this.store.instructions, online: () => this.runners.count > 0 }),
+				this.#codemodeExtension(),
+			];
 			for (const extension of extensions) registry.install(extension);
 			const pi = await Harness.open(
 				storage,

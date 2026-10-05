@@ -16,21 +16,32 @@ import {
 import { decodeValue, type EnvMethod, encodeValue, type WireResult } from "../core/protocol.ts";
 
 /** Sends one call to the runner; resolves with its result, or an error result when no runner is connected. */
-export type RunnerSend = (call: { cwd: string; method: EnvMethod; args: unknown[] }, onOutput: ((text: string) => void) | undefined, signal: AbortSignal | undefined) => Promise<WireResult>;
+export type RunnerSend = (call: { cwd: string; method: EnvMethod; args: unknown[]; key?: string }, onOutput: ((text: string) => void) | undefined, signal: AbortSignal | undefined) => Promise<WireResult>;
 
 export class RemoteEnv implements ExecutionEnv {
 	/** One file namespace: the desktop. pi serializes mutations per namespace. */
 	readonly id = "desktop";
 	cwd: string;
 	readonly #send: RunnerSend;
+	/** Set for one tool task: its calls are keyed task:n, so a replay after an eviction gets the first results. */
+	readonly #callId: string | undefined;
+	#n = 0;
 
-	constructor(cwd: string, send: RunnerSend) {
+	constructor(cwd: string, send: RunnerSend, callId?: string) {
 		this.cwd = cwd;
 		this.#send = send;
+		this.#callId = callId;
+	}
+
+	/** This env for one tool task (a unique id that survives replay), its desktop calls idempotent by key. */
+	forCall(callId: string): RemoteEnv {
+		return new RemoteEnv(this.cwd, this.#send, callId);
 	}
 
 	async #call<T>(method: EnvMethod, args: unknown[], context: Context, onOutput?: (text: string) => void): Promise<Result<T, never>> {
-		const result = await this.#send({ cwd: this.cwd, method, args: args.map(encodeValue) }, onOutput, context.abortSignal);
+		const key = this.#callId === undefined ? undefined : `${this.#callId}:${this.#n++}`;
+		const call = { cwd: this.cwd, method, args: args.map(encodeValue), ...(key === undefined ? {} : { key }) };
+		const result = await this.#send(call, onOutput, context.abortSignal);
 		if (result.ok) return { ok: true, value: decodeValue(result.value) as T };
 		const { kind, code, message, path } = result.error;
 		const error = kind === "exec" ? new ExecutionError(code as ExecutionErrorCode, message) : new FileError(code as FileErrorCode, message, path);

@@ -1,11 +1,14 @@
 // The desktop runner: dials out to the brain and serves pi's ExecutionEnv on this machine, so the agent's file and
 // shell tools act here while its memory and loop live on Cloudflare. Reconnects whenever the socket drops. Run on its
 // own (runner/runner.ts) or inside the front end (client/main.ts), which starts one while you use it.
+import { mkdirSync } from "node:fs";
 import { homedir, hostname, platform } from "node:os";
+import { dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { type BrainFrame, decodeValue, ENV_METHODS, encodeValue, type RunnerFrame, type WireResult } from "../core/protocol.ts";
+import { type Outcome, ResultCache } from "./cache.ts";
 
 const RECONNECT_MS = 2000;
 
@@ -15,6 +18,8 @@ export interface RunnerOptions {
 	readonly token: string;
 	/** Where to say what it does; silent by default (a front end owns the terminal). */
 	readonly log?: (line: string) => void;
+	/** Results of keyed calls, kept so a call the brain repeats after an eviction is not run twice. */
+	readonly cachePath?: string;
 }
 
 /** One env per working directory, as the local agent keeps them. */
@@ -46,10 +51,14 @@ export function startRunner(options: RunnerOptions): { stop(): void; readonly co
 	let stopped = false;
 	let current: WebSocket | undefined;
 	let connected = false;
+	const cachePath = options.cachePath ?? join(homedir(), ".saavy", "runner-cache.jsonl");
+	mkdirSync(dirname(cachePath), { recursive: true, mode: 0o700 });
+	const cache = new ResultCache(cachePath);
 	const connect = (): void => {
 		const socket = new WebSocket(url);
 		current = socket;
 		const running = new Map<string, AbortController>();
+		const keyedRunning = new Map<string, AbortController>();
 		const send = (frame: RunnerFrame) => {
 			if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
 		};
@@ -63,7 +72,7 @@ export function startRunner(options: RunnerOptions): { stop(): void; readonly co
 			const frame = JSON.parse(String(event.data)) as BrainFrame;
 			if (typeof frame?.id !== "string") return;
 			if (frame.op === "cancel") {
-				running.get(frame.id)?.abort();
+				(running.get(frame.id) ?? keyedRunning.get(frame.id))?.abort();
 				return;
 			}
 			if (frame.op !== "env" || !(ENV_METHODS as readonly string[]).includes(frame.method)) {
@@ -71,24 +80,40 @@ export function startRunner(options: RunnerOptions): { stop(): void; readonly co
 				return;
 			}
 			const abort = new AbortController();
-			running.set(frame.id, abort);
+			// A keyed call outlives this socket: the brain dropping it (an eviction) is when its result matters most.
+			(frame.key === undefined ? running : keyedRunning).set(frame.id, abort);
 			const context = withAbortSignal(abort.signal, BACKGROUND_CONTEXT);
 			const env = envFor(frame.cwd) as ExecutionEnv;
 			const args = frame.args.map(decodeValue);
-			log(`${frame.method} ${JSON.stringify(args[0]).slice(0, 160)}`);
-			try {
-				if (frame.method === "exec") {
-					const options = { ...(args[1] as object), onOutput: (text: string) => send({ id: frame.id, output: text }) };
-					send({ id: frame.id, result: toWire(await env.exec(args[0] as string, options, context)) });
-				} else {
+			const perform = async (): Promise<Outcome> => {
+				log(`${frame.method} ${JSON.stringify(args[0]).slice(0, 160)}`);
+				let output = "";
+				try {
+					if (frame.method === "exec") {
+						const onOutput = (text: string) => {
+							output += text;
+							send({ id: frame.id, output: text });
+						};
+						return { result: toWire(await env.exec(args[0] as string, { ...(args[1] as object), onOutput }, context)), output };
+					}
 					const method = env[frame.method] as (...rest: unknown[]) => Promise<{ ok: boolean; value?: unknown; error?: unknown }>;
-					send({ id: frame.id, result: toWire(await method.call(env, ...args, context)) });
+					return { result: toWire(await method.call(env, ...args, context)), output };
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return { result: { ok: false, error: { kind: frame.method === "exec" ? "exec" : "file", code: "unknown", message } }, output };
 				}
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				send({ id: frame.id, result: { ok: false, error: { kind: frame.method === "exec" ? "exec" : "file", code: "unknown", message } } });
+			};
+			try {
+				if (frame.key === undefined) send({ id: frame.id, result: (await perform()).result });
+				else {
+					const { outcome, fresh } = await cache.run(frame.key, perform);
+					// A repeat (after the brain's eviction) gets the output the first run streamed, then its result.
+					if (!fresh && outcome.output !== "") send({ id: frame.id, output: outcome.output });
+					send({ id: frame.id, result: outcome.result });
+				}
 			} finally {
 				running.delete(frame.id);
+				keyedRunning.delete(frame.id);
 			}
 		});
 		socket.addEventListener("close", () => {
@@ -96,7 +121,8 @@ export function startRunner(options: RunnerOptions): { stop(): void; readonly co
 			connected = false;
 			if (stopped) return;
 			log(`runner disconnected; retrying in ${RECONNECT_MS / 1000} s`);
-			setTimeout(connect, RECONNECT_MS).unref();
+			// Not unref: a standalone runner has nothing else keeping it alive between connections.
+			setTimeout(connect, RECONNECT_MS);
 		});
 		socket.addEventListener("error", () => {});
 	};
