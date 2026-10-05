@@ -316,6 +316,7 @@ export class Memory {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const deadline = new Promise<never>((_, reject) => {
 			timer = setTimeout(() => reject(timedOut), CALL_TIMEOUT_MS + 1000);
+			unref(timer);
 		});
 		const call = models.streamSimple(model, context, { signal, ...(thinking === "off" ? {} : { reasoning: thinking }) }).result();
 		const reply = await Promise.race([call, deadline]).finally(() => clearTimeout(timer));
