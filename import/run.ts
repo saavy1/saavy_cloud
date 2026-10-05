@@ -7,6 +7,8 @@
 //                                                   build the log and its summaries; resumable, and a larger --limit
 //                                                   later extends the same log (sessions keep their order)
 //   node import/run.ts samples [--db path]          summaries from each level, to judge their quality
+//   node import/run.ts upload [--db path]           put the built memory into the brain, ahead of the live chat
+//                                                   (as this signed-in device; the brain restarts to load it)
 //
 // The compactor model defaults to opencode-go/space-bunny-free. Keys come from pi's auth.json, as the local agent's
 // /login stores them (/login opencode-go, /login openrouter), or from OPENCODE_API_KEY / OPENROUTER_API_KEY.
@@ -231,7 +233,57 @@ function samples(): void {
 	}
 }
 
+/** The built memory into the brain, in batches under the WebSocket message limit. */
+async function upload(): Promise<void> {
+	const store = new NodeSqliteStore(dbPath);
+	const { readCredentials } = await import("../client/auth.ts");
+	const { RemoteSaavy } = await import("../client/remote.ts");
+	const { url, token } = readCredentials();
+	if (token === undefined) throw new Error("Not signed in: run saavy auth login");
+	const expect = {
+		log: Number((store.db.prepare("SELECT COUNT(*) AS n FROM saavy_log").get() as { n: number }).n),
+		tree: Number((store.db.prepare("SELECT COUNT(*) AS n FROM saavy_tree").get() as { n: number }).n),
+	};
+	const unbuilt = new Memory(store, { models: createModels(), current: () => ({ model: undefined, thinking: "off" }) });
+	const pending = unbuilt.view.unbuilt();
+	unbuilt.close();
+	if (pending > 0 && !process.argv.includes("--partial")) throw new Error(`${pending} view lines are not summarized yet; finish the build first (or pass --partial).`);
+	const brain = await RemoteSaavy.connect(url, token, join(homedir(), ".saavy", "cloud"));
+	const BATCH = 600_000;
+	const send = async (log: unknown[], tree: unknown[]) => brain.call<{ log: number; tree: number }>("importAdd", log, tree);
+	try {
+		await brain.call("importBegin");
+		let at = { log: 0, tree: 0 };
+		for (const [table, query] of [
+			["log", "SELECT i, kind, text, size, date, key FROM saavy_log ORDER BY i"],
+			["tree", "SELECT l, i, text, size, key FROM saavy_tree ORDER BY l, i"],
+		] as const) {
+			let batch: unknown[] = [];
+			let bytes = 0;
+			for (const row of store.db.prepare(query).iterate() as Iterable<Record<string, unknown>>) {
+				const size = String(row.text).length + 200;
+				if (bytes + size > BATCH && batch.length > 0) {
+					at = table === "log" ? await send(batch, []) : await send([], batch);
+					batch = [];
+					bytes = 0;
+					process.stdout.write(`\r${at.log}/${expect.log} messages, ${at.tree}/${expect.tree} summaries`);
+				}
+				batch.push({ ...row });
+				bytes += size;
+			}
+			if (batch.length > 0) at = table === "log" ? await send(batch, []) : await send([], batch);
+		}
+		console.log(`\r${at.log}/${expect.log} messages, ${at.tree}/${expect.tree} summaries staged`);
+		const view = store.viewLoad() ?? null;
+		const result = await brain.call<{ imported: number; live: number }>("importCommit", expect, view);
+		console.log(`The brain now holds ${result.imported} imported messages, then the ${result.live} of the live chat. It restarts to load them; the live messages are summarized again in their new place.`);
+	} finally {
+		brain.close();
+	}
+}
+
 if (verb === "plan") plan();
+else if (verb === "upload") await upload();
 else if (verb === "build") await build();
 else if (verb === "samples") samples();
-else console.log("Usage: node import/run.ts plan | build [--limit N] [--model provider/id] [--db path] | samples [--db path]");
+else console.log("Usage: node import/run.ts plan | build [options] | samples [--db path] | upload [--db path]");

@@ -27,6 +27,7 @@ import { RemoteEnv } from "./env.ts";
 import { createExtensions } from "./extension.ts";
 import { desktopReplay } from "./replay.ts";
 import { RUNNER_TAG, Runners } from "./runners.ts";
+import { type LogRow, MemoryImport, type TreeRow } from "./importer.ts";
 import { SqlMemoryStore } from "./store.ts";
 import { createSubagentTools, SubagentsDoc, tellIn } from "./subagents.ts";
 import { Turns } from "./turns.ts";
@@ -344,6 +345,15 @@ export class Brain extends DurableObject<Env> {
 				return this.models.getModels(provider).length;
 			},
 			deleteCredential: async (provider: string) => this.credentials.delete(provider),
+			/** A memory built by the importer: stage it in batches, then swap it in (the brain restarts to load it). */
+			importBegin: async () => new MemoryImport(this.ctx.storage).begin(),
+			importAdd: async (log: LogRow[], tree: TreeRow[]) => new MemoryImport(this.ctx.storage).add(log, tree),
+			importCommit: async (expect: { log: number; tree: number }, view: { parts: { l: number; i: number }[]; covers: number } | null) => {
+				const result = new MemoryImport(this.ctx.storage).commit(expect, view ?? undefined);
+				// Every cache (log length, tree presence, the view) reloads from the new tables in a fresh instance.
+				setTimeout(() => this.ctx.abort("memory imported; restarting to load it"), 500);
+				return result;
+			},
 			transcript: async (id: string) => this.#transcript(id),
 			tell: async (id: string, text: string) => {
 				const root = await this.root();
