@@ -29,6 +29,15 @@ export class SqlMemoryStore implements MemoryStore {
 		if (this.#meta("runner_home") !== home) this.#setMeta("runner_home", home);
 	}
 
+	/** The machine the runner last said it runs on. */
+	runnerHost(): string | undefined {
+		return this.#meta("runner_host");
+	}
+
+	setRunnerHost(host: string): void {
+		if (this.#meta("runner_host") !== host) this.#setMeta("runner_host", host);
+	}
+
 	/** The user's instructions as last read on the desktop, for when it is offline. */
 	readonly instructions = {
 		get: (): string | undefined => this.#meta("instructions"),

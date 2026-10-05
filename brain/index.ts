@@ -8,7 +8,7 @@ import { type Api, clampThinkingLevel, type Model, Type } from "@earendil-works/
 import { createModels, type Models, type Provider } from "@earendil-works/pi-ai/models";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { AgentDoc, type Conversation, type Cursor, createRegistry, defineExtension, defineTool, type EntryRecord, Harness, LiveDoc, type ModelRef, UserEntry } from "@earendil-works/pi-durable";
+import { AgentDoc, type Conversation, type Cursor, createRegistry, defineExtension, defineTool, type EntryRecord, type Extension, Harness, LiveDoc, type ModelRef, UserEntry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
@@ -65,7 +65,10 @@ export class Brain extends DurableObject<Env> {
 	});
 	readonly runners = new Runners(
 		() => this.ctx.getWebSockets(RUNNER_TAG),
-		(hello) => this.store.setRunnerHome(hello.home),
+		(hello) => {
+			this.store.setRunnerHome(hello.home);
+			this.store.setRunnerHost(hello.host);
+		},
 	);
 	readonly #envs = new Map<string, RemoteEnv>();
 
@@ -76,7 +79,7 @@ export class Brain extends DurableObject<Env> {
 			const replay = desktopReplay(CodingTools.tools ?? []);
 			const codemode = this.#codemodeExtension();
 			// Subagents work like the main agent (coding tools on the desktop, memory, codemode) under their own prompt.
-			const forSubagents = [CodingTools, replay, optchat.memory, codemode, optchat.sub];
+			const forSubagents: Extension[] = [CodingTools, replay, optchat.memory, codemode, optchat.sub];
 			const subagents = createSubagentTools(
 				{
 					settle: (signal) => {
@@ -94,7 +97,9 @@ export class Brain extends DurableObject<Env> {
 					thinking: () => this.settings.get().subagent?.thinking,
 				},
 			);
-			const master = [CodingTools, replay, optchat.memory, codemode, optchat.ui, optchat.master, subagents];
+			const status = this.#statusExtension();
+			forSubagents.push(status);
+			const master = [CodingTools, replay, optchat.memory, codemode, optchat.ui, optchat.master, subagents, status];
 			for (const extension of [...master, optchat.sub]) registry.install(extension);
 			const pi = await Harness.open(
 				storage,
@@ -475,6 +480,36 @@ export class Brain extends DurableObject<Env> {
 			connectors: [new DesktopConnector(this.ctx, this.env, () => this.desktop())],
 		});
 		return this.#codemode;
+	}
+
+	/** status: how the agent runs right now, the things too changeable for the prompt. */
+	#statusExtension() {
+		return defineExtension({
+			name: "saavy-status",
+			tools: [
+				defineTool({
+					name: "status",
+					description:
+						"How you run right now: your model and thinking level, the compactor's model, the working directory, whether the user's desktop runner is connected (and which machine), connected front ends, memory size, and the current time (UTC).",
+					parameters: Type.Object({}),
+					replay: "safe",
+					execute: async () => {
+						const config = this.settings.get();
+						const view = this.memory.view;
+						const lines = [
+							`now: ${new Date().toISOString()} (UTC)`,
+							`model: ${config.model} (thinking ${config.thinking}); compactor: ${config.compactor.model} (thinking ${config.compactor.thinking})`,
+							`where you run: a Cloudflare Durable Object (the brain); your tools act on the user's machine through its runner`,
+							`desktop runner: ${this.runners.count > 0 ? `connected (${this.store.runnerHost() ?? "unknown host"})` : "offline: file and shell tools will wait, then fail"}`,
+							`working directory: ${this.cwd(config)}`,
+							`front ends connected: ${this.clients.count}`,
+							`memory: ${this.memory.log.length} messages, ${this.memory.tree.size} summaries, view ${view.parts.length} lines (${view.size()} bytes), ${view.unbuilt()} lines not summarized yet`,
+						];
+						return { content: [{ type: "text", text: lines.join("\n") }] };
+					},
+				}),
+			],
+		});
 	}
 
 	#codemodeExtension() {

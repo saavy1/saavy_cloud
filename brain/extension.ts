@@ -83,6 +83,11 @@ export function createExtensions(memory: () => Memory, cache: InstructionsCache)
 		section("view", () => VIEW_DOC, { tag: false }),
 		section("cwd", (input) => input.env?.cwd),
 		section("user_instructions", (input, context) => instructions(input.env, cache, context)),
+		// Last, and only the model: prompt caches are per model anyway, so this changes only when the cache is lost too.
+		// Anything that changes more often (runner, memory, time) is the status tool's.
+		section("model", (input) =>
+			input.agent.model === undefined ? undefined : `You are running on ${input.agent.model.provider}/${input.agent.model.modelId}. For anything else about how you run right now, call status.`,
+		),
 	];
 	const Memory = defineExtension({
 		name: "saavy-memory",
