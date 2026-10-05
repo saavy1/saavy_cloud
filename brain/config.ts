@@ -9,6 +9,8 @@ export interface Config {
 	readonly compactor: { readonly model: string; readonly thinking: ModelThinkingLevel | "off" };
 	/** The agent's working directory on the desktop; the runner's home until set. */
 	readonly cwd?: string;
+	/** What new subagents run with; absent: the main agent's model and thinking level. */
+	readonly subagent?: { readonly model?: string; readonly thinking?: ModelThinkingLevel };
 }
 
 export const DEFAULTS: Config = {

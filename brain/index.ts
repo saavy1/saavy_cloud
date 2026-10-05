@@ -7,7 +7,7 @@ import { createCodemodeRuntime, DynamicWorkerExecutor, type CodemodeRuntimeHandl
 import { type Api, clampThinkingLevel, type Model, Type } from "@earendil-works/pi-ai";
 import { createModels, type Models, type Provider } from "@earendil-works/pi-ai/models";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
-import { AgentDoc, type Conversation, createRegistry, defineExtension, defineTool, Harness, type ModelRef, UserEntry } from "@earendil-works/pi-durable";
+import { AgentDoc, type Conversation, type Cursor, createRegistry, defineExtension, defineTool, type EntryRecord, Harness, LiveDoc, type ModelRef, UserEntry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
@@ -24,6 +24,7 @@ import { createExtensions } from "./extension.ts";
 import { desktopReplay } from "./replay.ts";
 import { RUNNER_TAG, Runners } from "./runners.ts";
 import { SqlMemoryStore } from "./store.ts";
+import { createSubagentTools, SubagentsDoc, tellIn } from "./subagents.ts";
 import { Turns } from "./turns.ts";
 
 // The facet class the codemode runtime spawns; exported from the entry so it is on ctx.exports.
@@ -64,16 +65,39 @@ export class Brain extends DurableObject<Env> {
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
 			const registry = createRegistry();
-			const extensions = [
-				CodingTools,
-				desktopReplay(CodingTools.tools ?? []),
-				...createExtensions(() => this.memory, { ...this.store.instructions, online: () => this.runners.count > 0 }),
-				this.#codemodeExtension(),
-			];
-			for (const extension of extensions) registry.install(extension);
+			const optchat = createExtensions(() => this.memory, { ...this.store.instructions, online: () => this.runners.count > 0 });
+			const replay = desktopReplay(CodingTools.tools ?? []);
+			const codemode = this.#codemodeExtension();
+			// Subagents work like the main agent (coding tools on the desktop, memory, codemode) under their own prompt.
+			const forSubagents = [CodingTools, replay, optchat.memory, codemode, optchat.sub];
+			const subagents = createSubagentTools(
+				{
+					settle: (signal) => {
+						this.turns.drive();
+						return this.memory.settle(signal, 20_000);
+					},
+					render: () => this.memory.view.render(),
+				},
+				() => forSubagents,
+				{
+					model: () => {
+						const model = this.settings.get().subagent?.model;
+						return model === undefined ? undefined : modelRef(model);
+					},
+					thinking: () => this.settings.get().subagent?.thinking,
+				},
+			);
+			const master = [CodingTools, replay, optchat.memory, codemode, optchat.master, subagents];
+			for (const extension of [...master, optchat.sub]) registry.install(extension);
 			const pi = await Harness.open(
 				storage,
-				{ models: this.models, registry, env: ({ cwd }) => this.desktop(cwd ?? this.cwd()), onReport: (error) => console.warn("pi report", error) },
+				{
+					models: this.models,
+					registry,
+					env: ({ cwd }) => this.desktop(cwd ?? this.cwd()),
+					settings: { extensions: master },
+					onReport: (error) => console.warn("pi report", error),
+				},
 				context,
 			);
 			const config = this.settings.get();
@@ -84,6 +108,8 @@ export class Brain extends DurableObject<Env> {
 			await this.#catchUp(root);
 			pi.subscribeCommits((publication) => {
 				for (const change of publication.changes) {
+					// A subagent report in the outbox: hand it to the main agent.
+					if (change.type === "document" && change.record.kind === "saavy.subagents" && change.conversationId === root.id) void this.turns.deliver();
 					if (change.type !== "entry" || change.value.conversationId !== root.id) continue;
 					this.memory.log.add(change.value);
 					this.clients.broadcast({ t: "entry", entry: change.value });
@@ -93,7 +119,71 @@ export class Brain extends DurableObject<Env> {
 		},
 	});
 
-	readonly turns = new Turns(this.ctx.storage.sql, () => ({ memory: this.memory, harness: this.harness, root: () => this.root(), context }));
+	readonly turns = new Turns(this.ctx.storage.sql, () => ({
+		memory: this.memory,
+		harness: this.harness,
+		root: () => this.root(),
+		context,
+		outbox: async () => (await this.#subagentState())?.outbox ?? [],
+		ack: async (ids) => {
+			const root = await this.root();
+			await root.commit(async (tx) => {
+				const state = await tx.doc(SubagentsDoc, root.id);
+				state.outbox = state.outbox.filter((item) => !ids.includes(item.id));
+			}, context);
+		},
+	}));
+
+	async #subagentState() {
+		return (await this.harness.pi()).snapshot(SubagentsDoc, (await this.root()).id, context);
+	}
+
+	/** Each subagent: its task, whether it is working (and on which tool), whether it has reported. */
+	async #subagents() {
+		const pi = await this.harness.pi();
+		const state = await this.#subagentState();
+		const out = [];
+		for (const [id, agent] of Object.entries(state?.agents ?? {})) {
+			const live = await pi.snapshot(LiveDoc, agent.conversationId, context);
+			const tool = live?.tools?.find((slot) => slot.status === "running")?.name;
+			out.push({ id, task: agent.task, working: live?.run !== undefined, ...(tool === undefined ? {} : { tool }), reported: agent.reported.length > 0 });
+		}
+		return out;
+	}
+
+	/** A subagent's whole conversation as markdown, oldest first; null for an unknown id. */
+	async #transcript(id: string): Promise<string | null> {
+		const agent = (await this.#subagentState())?.agents[id];
+		const conversation = agent === undefined ? undefined : await (await this.harness.pi()).conversation(agent.conversationId, context);
+		if (conversation === undefined) return null;
+		const entries: EntryRecord[] = [];
+		let cursor: Cursor | undefined;
+		do {
+			const page = await conversation.entries({}, 256, cursor, context);
+			entries.push(...page.items);
+			cursor = page.next;
+		} while (cursor !== undefined);
+		const fence = (text: string) => `\`\`\`\n${text.length > 1200 ? `${text.slice(0, 1200)}\n… (${text.length - 1200} more characters)` : text}\n\`\`\``;
+		const parts: string[] = [];
+		for (const entry of entries.reverse()) {
+			for (const message of entry.model ?? []) {
+				if (entry.kind === "pi.user" && message.role === "user") {
+					// The first message starts with the view; only the task matters here.
+					const blocks = typeof message.content === "string" ? [message.content] : message.content.flatMap((b) => (b.type === "text" ? [b.text] : []));
+					parts.push(`**→ ${parts.length === 0 ? "task" : "message"}:** ${blocks.filter((block) => !block.startsWith("<chat>")).join("\n\n")}`);
+				} else if (entry.kind === "pi.assistant" && message.role === "assistant") {
+					for (const block of message.content) {
+						if (block.type === "text" && block.text.trim() !== "") parts.push(block.text.trim());
+						else if (block.type === "toolCall") parts.push(`**▸ ${block.name}** \`${JSON.stringify(block.arguments).slice(0, 300)}\``);
+					}
+				} else if (entry.kind === "pi.tool-result" && message.role === "toolResult") {
+					const text = message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n").trimEnd();
+					parts.push((message.isError ? "**error:**\n" : "") + fence(text));
+				}
+			}
+		}
+		return parts.join("\n\n");
+	}
 
 	readonly clients = new Clients(() => this.ctx.getWebSockets(CLIENT_TAG), this.#clientMethods());
 
@@ -229,6 +319,24 @@ export class Brain extends DurableObject<Env> {
 				return this.settings.set({ compactor: { model: model ?? current.model, thinking: thinking ?? current.thinking } }).compactor;
 			},
 			config: async () => ({ ...this.settings.get(), cwd: this.cwd() }),
+			setSubagentModel: async (model: string | undefined, thinking?: Config["thinking"]) => {
+				const subagent = model === undefined && thinking === undefined ? undefined : { ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinking }) };
+				return this.settings.set({ subagent }).subagent ?? null;
+			},
+			subagents: async () => this.#subagents(),
+			transcript: async (id: string) => this.#transcript(id),
+			tell: async (id: string, text: string) => {
+				const root = await this.root();
+				const group = `user:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+				return root.commit((tx) => tellIn(tx, root.id, id, `(from the user) ${text}`, group), context);
+			},
+			stop: async (id: string) => {
+				const agent = (await this.#subagentState())?.agents[id];
+				const conversation = agent === undefined ? undefined : await (await this.harness.pi()).conversation(agent.conversationId, context);
+				if (conversation === undefined) return false;
+				await conversation.abort(context);
+				return true;
+			},
 			usage: async () => (await pi()).usage(context),
 			stats: async () => this.#stats(),
 			view: async () => this.memory.view.render(),

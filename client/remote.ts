@@ -19,6 +19,15 @@ export interface BrainConfig {
 	readonly thinking: ModelThinkingLevel;
 	readonly compactor: { readonly model: string; readonly thinking: Thinking };
 	readonly cwd: string;
+	readonly subagent?: { readonly model?: string; readonly thinking?: ModelThinkingLevel };
+}
+
+export interface SubagentSummary {
+	readonly id: string;
+	readonly task: string;
+	readonly working: boolean;
+	readonly tool?: string;
+	readonly reported: boolean;
 }
 
 const RECONNECT_MS = [500, 1000, 2000, 5000, 10_000];
@@ -321,10 +330,26 @@ export class RemoteSaavy {
 		return this.call("usage");
 	}
 
-	/** Subagents and self-refreshing UIs live in the local agent only, for now. */
-	async subagents(): Promise<{ id: string; task: string; working: boolean; tool?: string; reported: boolean }[]> {
-		return [];
+	/** The subagents, polled by the front ends; empty while disconnected. */
+	async subagents(): Promise<SubagentSummary[]> {
+		return this.call<SubagentSummary[]>("subagents").catch(() => []);
 	}
+	/** A subagent's whole run as markdown; undefined for an unknown id. */
+	async transcript(id: string): Promise<string | undefined> {
+		return (await this.call<string | null>("transcript", id)) ?? undefined;
+	}
+	tell(id: string, text: string): Promise<boolean> {
+		return this.call("tell", id, text);
+	}
+	stop(id: string): Promise<boolean> {
+		return this.call("stop", id);
+	}
+	async setSubagentModel(model: string | undefined, thinking?: ModelThinkingLevel): Promise<void> {
+		const subagent = await this.call<BrainConfig["subagent"] | null>("setSubagentModel", model, thinking);
+		this.config = { ...this.config, subagent: subagent ?? undefined };
+	}
+
+	/** Self-refreshing UIs live in the local agent only, for now. */
 	refresh(_handle: string): boolean {
 		return false;
 	}

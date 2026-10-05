@@ -7,7 +7,7 @@ import { type Message, Type } from "@earendil-works/pi-ai";
 import { defineDoc, defineExtension, defineTool, type Extension, GenerationTask, hook, ROOT_CONVERSATION_ID, section } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { Memory } from "../core/memory.ts";
-import { DATE_DESCRIPTION, MASTER, SEARCH_DESCRIPTION, VIEW_DOC, ZOOM_DESCRIPTION } from "../core/prompts.ts";
+import { DATE_DESCRIPTION, MASTER, SEARCH_DESCRIPTION, SUBAGENT, VIEW_DOC, ZOOM_DESCRIPTION } from "../core/prompts.ts";
 
 export const TurnDoc = defineDoc<{ view: string }>({
 	kind: "saavy.turn",
@@ -62,7 +62,22 @@ async function instructions(env: ExecutionEnv | undefined, cache: InstructionsCa
 	return result;
 }
 
-export function createExtensions(memory: () => Memory, cache: InstructionsCache): Extension[] {
+export interface OptChatExtensions {
+	/** zoom, search, date: for the main agent and its subagents. */
+	readonly memory: Extension;
+	/** The main agent's prompt and the hook that gives each turn its view. */
+	readonly master: Extension;
+	/** A subagent's prompt (its view arrives in its first message). */
+	readonly sub: Extension;
+}
+
+export function createExtensions(memory: () => Memory, cache: InstructionsCache): OptChatExtensions {
+	const prompt = (preamble: string) => [
+		section("preamble", () => preamble, { tag: false }),
+		section("view", () => VIEW_DOC, { tag: false }),
+		section("cwd", (input) => input.env?.cwd),
+		section("user_instructions", (input, context) => instructions(input.env, cache, context)),
+	];
 	const Memory = defineExtension({
 		name: "saavy-memory",
 		tools: [
@@ -101,12 +116,7 @@ export function createExtensions(memory: () => Memory, cache: InstructionsCache)
 	});
 	const Master = defineExtension({
 		name: "saavy",
-		sections: [
-			section("preamble", () => MASTER, { tag: false }),
-			section("view", () => VIEW_DOC, { tag: false }),
-			section("cwd", (input) => input.env?.cwd),
-			section("user_instructions", (input, context) => instructions(input.env, cache, context)),
-		],
+		sections: prompt(MASTER),
 		hooks: [
 			hook(GenerationTask, {
 				beforeRequest: async (request, api, context) => {
@@ -117,5 +127,6 @@ export function createExtensions(memory: () => Memory, cache: InstructionsCache)
 			}),
 		],
 	});
-	return [Memory, Master];
+	const Sub = defineExtension({ name: "saavy-subagent", sections: prompt(SUBAGENT) });
+	return { memory: Memory, master: Master, sub: Sub };
 }

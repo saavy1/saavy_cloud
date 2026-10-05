@@ -24,6 +24,10 @@ export interface TurnHost {
 	readonly harness: PiHarness;
 	root(): Promise<Conversation>;
 	readonly context: Context;
+	/** Subagent reports waiting for the main agent. */
+	outbox(): Promise<readonly { readonly id: string; readonly text: string }[]>;
+	/** Take delivered reports out of the outbox. */
+	ack(ids: readonly string[]): Promise<void>;
 }
 
 interface Item {
@@ -75,6 +79,11 @@ export class Turns extends LifecycleCapability {
 		return Number(this.#sql.exec("SELECT COUNT(*) AS n FROM saavy_inbox").one().n);
 	}
 
+	/** Hand waiting subagent reports to the main agent (a job, so it survives an eviction). */
+	async deliver(): Promise<void> {
+		await this.lifecycle.jobs.push({ id: "deliver", fn: "deliver", time: Date.now() });
+	}
+
 	/** Make sure the compactor job is pending; cheap to call on every change. */
 	async compact(): Promise<void> {
 		if (this.lifecycle.jobs.get("compact") !== undefined) return;
@@ -89,11 +98,12 @@ export class Turns extends LifecycleCapability {
 	async onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome> {
 		if (job.fn === "turn") return this.#turn();
 		if (job.fn === "compact") return this.#compactBeat();
+		if (job.fn === "deliver") return this.#deliver();
 		return undefined;
 	}
 
 	/** Start a compactor drive unless one is running; Lifecycle tracks it so an alarm does not outlive it unseen. */
-	#ensureDrive(budgetMs: number): void {
+	drive(budgetMs: number = DRIVE_BUDGET_MS): void {
 		if (this.#drive !== undefined) return;
 		const drive: Promise<void> = this.#host()
 			.memory.drive(budgetMs)
@@ -138,7 +148,7 @@ export class Turns extends LifecycleCapability {
 		if (host.memory.view.unbuilt() > 0) {
 			this.#settleSince ??= Date.now();
 			if (Date.now() - this.#settleSince < SETTLE_MS) {
-				this.#ensureDrive(DRIVE_BUDGET_MS);
+				this.drive();
 				void this.compact();
 				return { rescheduleAt: Date.now() + 500 };
 			}
@@ -162,7 +172,29 @@ export class Turns extends LifecycleCapability {
 	async #compactBeat(): Promise<LifecycleJobOutcome> {
 		const { memory } = this.#host();
 		if (!memory.pending && this.#drive === undefined) return undefined;
-		this.#ensureDrive(DRIVE_BUDGET_MS);
+		this.drive();
 		return { rescheduleAt: Date.now() + HEARTBEAT_MS };
+	}
+
+	/**
+	 * Reports go between the main agent's tool calls while it runs, else into the inbox as the next turn. Both are
+	 * idempotent by report id (a rerun after an eviction resubmits or reinserts the same one), and only then are the
+	 * reports taken out of the outbox.
+	 */
+	async #deliver(): Promise<LifecycleJobOutcome> {
+		const host = this.#host();
+		const reports = await host.outbox();
+		if (reports.length === 0) return undefined;
+		const busy = await host.harness.session().busy();
+		for (const report of reports) {
+			const id = `report:${report.id}`;
+			if (busy) {
+				await host.harness.submit(report.text, { operationId: id, whenBusy: "steer" });
+				this.#sql.exec("INSERT OR REPLACE INTO saavy_ops (item, operation, at) VALUES (?, ?, ?)", id, id, Date.now());
+			} else this.#sql.exec("INSERT OR IGNORE INTO saavy_inbox (id, text, at) VALUES (?, ?, ?)", id, report.text, Date.now());
+		}
+		await host.ack(reports.map((report) => report.id));
+		if (!busy) await this.lifecycle.jobs.push({ id: "turn", fn: "turn", time: Date.now() });
+		return undefined;
 	}
 }

@@ -1,6 +1,6 @@
 // Slash commands. Each has a usage line, help, optional tab completion of its arguments, and a run function.
-// Settings live in the brain; commands for what the brain does not do yet (subagents, MCP, provider logins) are left
-// out rather than half-working.
+// Settings live in the brain; commands for what the brain does not do yet (MCP, provider logins, self-extension) are
+// left out rather than half-working.
 
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
@@ -68,6 +68,11 @@ async function pickModel(ui: Ui, query: string): Promise<string | undefined> {
 	);
 	return choice || undefined;
 }
+
+const short = (text: string, max: number): string => {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+};
 
 const splitKey = (key: string) => {
 	const slash = key.indexOf("/");
@@ -139,6 +144,75 @@ export const commands: Command[] = [
 			if (query !== "" && model === undefined) return;
 			await ui.saavy.setCompactor(model, thinking);
 			ui.print(`compactor: ${ui.saavy.config.compactor.model} (thinking ${ui.saavy.config.compactor.thinking})`);
+		},
+	},
+	{
+		name: "submodel",
+		usage: "/submodel [model|default] [thinking]",
+		help: "Show or set the model new subagents run with (default: the main model)",
+		complete: (saavy, args) => {
+			const words = args.split(" ");
+			if (words.length <= 1) return [...modelKeys(saavy, args), ...("default".startsWith(args) ? ["default"] : [])];
+			const prefix = words.slice(0, -1).join(" ");
+			return THINKING.filter((level) => level.startsWith(words.at(-1)!)).map((level) => `${prefix} ${level}`);
+		},
+		run: async (ui, args) => {
+			if (args === "") {
+				const { subagent } = ui.saavy.config;
+				ui.print(`subagents: ${subagent?.model ?? "main model"} (thinking ${subagent?.thinking ?? "main's"})`);
+				return;
+			}
+			const words = args.split(/\s+/).filter(Boolean);
+			const last = words.at(-1) as Thinking | undefined;
+			const thinking = last !== undefined && last !== "off" && THINKING.includes(last) ? (last as ModelThinkingLevel) : undefined;
+			const query = (thinking === undefined ? words : words.slice(0, -1)).join(" ");
+			const model = query === "" || query === "default" ? undefined : await pickModel(ui, query);
+			if (query !== "" && query !== "default" && model === undefined) return;
+			await ui.saavy.setSubagentModel(model, thinking);
+			ui.print(`subagents: ${model ?? "main model"}${thinking === undefined ? "" : ` (thinking ${thinking})`}`);
+		},
+	},
+	{
+		name: "agents",
+		usage: "/agents [id]",
+		help: "Pick a subagent (or name one) and read its whole run",
+		complete: (_saavy, args) => lastAgentIds.filter((id) => id.startsWith(args)),
+		run: async (ui, args) => {
+			const agents = await ui.saavy.subagents();
+			if (agents.length === 0) return ui.print("No subagents yet.");
+			const id =
+				args !== ""
+					? args
+					: await ui.choose(
+							"Subagents",
+							[...agents].reverse().map((agent) => ({ id: agent.id, label: `${agent.id}  ${agent.working ? "working" : agent.reported ? "done" : "idle"}  ${short(agent.task, 90)}` })),
+						);
+			if (id === "") return;
+			const markdown = await ui.saavy.transcript(id);
+			if (markdown === undefined) return ui.print(`No subagent ${id}.`);
+			const agent = agents.find((candidate) => candidate.id === id);
+			ui.showDoc(`${id} · ${short(agent?.task ?? "", 80)}`, markdown);
+		},
+	},
+	{
+		name: "tell",
+		usage: "/tell <id> <message>",
+		help: "Message a subagent directly; its answer goes to the main agent",
+		complete: (_saavy, args) => lastAgentIds.filter((id) => id.startsWith(args)),
+		run: async (ui, args) => {
+			const [id, ...rest] = args.split(" ");
+			const text = rest.join(" ").trim();
+			if (id === undefined || text === "") return ui.print("Usage: /tell <id> <message>");
+			ui.print((await ui.saavy.tell(id, text)) ? `Sent to ${id}.` : `No subagent ${id}.`);
+		},
+	},
+	{
+		name: "stop",
+		usage: "/stop <id>",
+		help: "Stop a subagent's current work",
+		complete: (_saavy, args) => lastAgentIds.filter((id) => id.startsWith(args)),
+		run: async (ui, args) => {
+			ui.print((await ui.saavy.stop(args)) ? `Stopped ${args}.` : `No subagent ${args}.`);
 		},
 	},
 	{
@@ -251,8 +325,11 @@ async function clearScreen(ui: Ui): Promise<void> {
 	await ui.saavy.note(CLEARED);
 }
 
-/** Subagent ids for completion; the brain has no subagents yet. */
-export function setAgentIds(_ids: string[]): void {}
+let lastAgentIds: string[] = [];
+/** Subagent ids for completion, refreshed by the front end as it polls the subagents. */
+export function setAgentIds(ids: string[]): void {
+	lastAgentIds = ids;
+}
 
 export function findCommand(name: string): Command | undefined {
 	return commands.find((command) => command.name === name);
