@@ -81,6 +81,75 @@ async function login(base: string, browser: boolean): Promise<void> {
 	throw new Error("the code expired; run saavy auth login again");
 }
 
+/** One call to the brain, as this signed-in device (through a short-lived client socket). */
+async function brainCall<T>(credentials: Credentials, method: string, ...args: unknown[]): Promise<T> {
+	if (credentials.token === undefined) throw new Error("not signed in; run saavy auth login");
+	const { RemoteSaavy } = await import("./remote.ts");
+	const brain = await RemoteSaavy.connect(credentials.url, credentials.token, join(homedir(), ".saavy", "cloud"));
+	try {
+		return await brain.call<T>(method, ...args);
+	} finally {
+		brain.close();
+	}
+}
+
+/** Read a secret from the terminal without echoing it. */
+function askSecret(prompt: string): Promise<string> {
+	return new Promise((resolve) => {
+		process.stdout.write(prompt);
+		const stdin = process.stdin;
+		let value = "";
+		stdin.setRawMode?.(true);
+		stdin.resume();
+		stdin.setEncoding("utf8");
+		const onData = (chunk: string) => {
+			for (const char of chunk) {
+				if (char === "\r" || char === "\n" || char === "\u0004") {
+					stdin.setRawMode?.(false);
+					stdin.pause();
+					stdin.off("data", onData);
+					process.stdout.write("\n");
+					return resolve(value.trim());
+				}
+				if (char === "\u0003") process.exit(130);
+				value = char === "\u007f" ? value.slice(0, -1) : value + char;
+			}
+		};
+		stdin.on("data", onData);
+	});
+}
+
+/** `saavy auth provider login|logout|list [provider]`: the model provider credentials the brain holds. */
+async function providerCommand(args: readonly string[], saved: Credentials): Promise<void> {
+	const [verb = "list", provider] = args;
+	if (verb === "list") {
+		const list = await brainCall<{ providerId: string; type: string }[]>(saved, "credentials");
+		console.log(list.length === 0 ? "No provider credentials in the brain yet." : list.map((entry) => `${entry.providerId} (${entry.type})`).join("\n"));
+		return;
+	}
+	if (provider === undefined) throw new Error(`usage: saavy auth provider ${verb} <provider>`);
+	if (verb === "logout") {
+		await brainCall(saved, "deleteCredential", provider);
+		console.log(`Removed ${provider} from the brain.`);
+		return;
+	}
+	if (verb !== "login") throw new Error("usage: saavy auth provider login|logout|list [provider]");
+	// What pi's /login stored on this machine, else a key typed now.
+	const piAuth = join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "auth.json");
+	const local = existsSync(piAuth) ? (JSON.parse(readFileSync(piAuth, "utf8")) as Record<string, { type: string }>)[provider] : undefined;
+	let credential: object;
+	if (local !== undefined) {
+		console.log(`Using the ${local.type === "oauth" ? "sign-in" : "key"} for ${provider} from ${piAuth}.`);
+		credential = local;
+	} else {
+		const key = await askSecret(`API key for ${provider}: `);
+		if (key === "") throw new Error("no key given");
+		credential = { type: "api_key", key };
+	}
+	const models = await brainCall<number>(saved, "setCredential", provider, credential);
+	console.log(`The brain can use ${provider} now (${models} models).`);
+}
+
 /** Run `saavy auth <verb>`; the process exit code. */
 export async function authCommand(args: readonly string[]): Promise<number> {
 	const [verb = "status"] = args;
@@ -88,7 +157,8 @@ export async function authCommand(args: readonly string[]): Promise<number> {
 	const saved = readCredentials();
 	const base = (urlFlag >= 0 ? args[urlFlag + 1] : undefined) ?? saved.url;
 	try {
-		if (verb === "login") await login(base.replace(/\/$/, ""), !args.includes("--no-browser"));
+		if (verb === "provider") await providerCommand(args.slice(1), saved);
+		else if (verb === "login") await login(base.replace(/\/$/, ""), !args.includes("--no-browser"));
 		else if (verb === "logout") {
 			if (saved.token !== undefined) await post(`${saved.url}/api/auth/sign-out`, {}, saved.token).catch(() => undefined);
 			writeCredentials({ url: saved.url });
@@ -105,7 +175,7 @@ export async function authCommand(args: readonly string[]): Promise<number> {
 			}
 			console.log(`Signed in to ${saved.url} as ${((await me.json()) as { name: string }).name}.`);
 		} else {
-			console.log("Usage: saavy auth login [--url URL] [--no-browser] | logout | status");
+			console.log("Usage: saavy auth login [--url URL] [--no-browser] | logout | status | provider login|logout|list [provider]");
 			return 2;
 		}
 		return 0;

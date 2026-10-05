@@ -6,7 +6,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createCodemodeRuntime, DynamicWorkerExecutor, type CodemodeRuntimeHandle } from "@cloudflare/codemode";
 import { type Api, clampThinkingLevel, type Model, Type } from "@earendil-works/pi-ai";
 import { createModels, type Models, type Provider } from "@earendil-works/pi-ai/models";
-import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
+import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { AgentDoc, type Conversation, type Cursor, createRegistry, defineExtension, defineTool, type EntryRecord, Harness, LiveDoc, type ModelRef, UserEntry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { PiHarness } from "agents/harness/pi";
@@ -20,6 +21,7 @@ import { Memory } from "../core/memory.ts";
 import type { MemoryStats, MsgInfo, NodeInfo, Phase } from "../core/protocol.ts";
 import { CLIENT_TAG, Clients } from "./clients.ts";
 import { type Config, ConfigStore, modelRef, ROUTING } from "./config.ts";
+import { type Credential, NO_AMBIENT_AUTH, SqlCredentialStore } from "./credentials.ts";
 import { DesktopConnector } from "./desktop.codemode.ts";
 import { RemoteEnv } from "./env.ts";
 import { createExtensions } from "./extension.ts";
@@ -46,10 +48,14 @@ export class Brain extends DurableObject<Env> {
 	readonly store = new SqlMemoryStore(this.ctx.storage);
 	readonly settings = new ConfigStore(this.ctx.storage.sql);
 	readonly ai = createAI({ binding: this.env.AI });
+	/** Provider keys and OAuth tokens, set from a signed-in device. */
+	readonly credentials = new SqlCredentialStore(this.ctx.storage.sql);
 	readonly models = this.#createModels();
 	readonly memory = new Memory(this.store, {
 		models: this.models,
 		driven: true,
+		// One provider session for the compactor (OpenCode requires one; others keep its prefix cached).
+		sessionId: `saavy-compactor-${this.ctx.id.toString().slice(0, 12)}`,
 		current: () => {
 			const { compactor } = this.settings.get();
 			const ref = modelRef(compactor.model);
@@ -325,6 +331,14 @@ export class Brain extends DurableObject<Env> {
 				return this.settings.set({ subagent }).subagent ?? null;
 			},
 			subagents: async () => this.#subagents(),
+			/** Provider credentials: which are set (never their secrets), set one, remove one. */
+			credentials: async () => this.credentials.list(),
+			setCredential: async (provider: string, credential: Credential) => {
+				if (this.models.getProvider(provider) === undefined) throw new Error(`Unknown provider ${provider}`);
+				await this.credentials.modify(provider, async () => credential);
+				return this.models.getModels(provider).length;
+			},
+			deleteCredential: async (provider: string) => this.credentials.delete(provider),
 			transcript: async (id: string) => this.#transcript(id),
 			tell: async (id: string, text: string) => {
 				const root = await this.root();
@@ -425,21 +439,23 @@ export class Brain extends DurableObject<Env> {
 	}
 
 	/** Workers AI plus OpenRouter's catalog, every OpenRouter model routed through AI Gateway (a BYOK key there). */
+	/**
+	 * Providers called directly (no gateway in the way), with the credentials the brain holds: OpenCode Go and
+	 * OpenRouter (its models carrying the provider pins in ROUTING), plus Workers AI through the AI binding.
+	 */
 	#createModels(): Models {
-		const models = createModels();
+		const models = createModels({ credentials: this.credentials, authContext: NO_AMBIENT_AUTH });
 		models.setProvider(this.ai.provider);
-		const provider = this.ai.provider;
-		const openrouter = Object.values(OPENROUTER_MODELS).map((model) => {
+		models.setProvider(opencodeGoProvider());
+		const openrouter = openrouterProvider();
+		const pinned = openrouter.getModels().map((model) => {
 			const routing = ROUTING[model.id];
-			const routed = routing === undefined ? model : { ...model, compat: { ...model.compat, openRouterRouting: routing } };
-			return this.ai(routed as Model<Api>);
+			return routing === undefined ? model : { ...model, compat: { ...model.compat, openRouterRouting: routing } };
 		});
 		models.setProvider(
-			new Proxy(provider, {
+			new Proxy(openrouter, {
 				get: (target, key) => {
-					if (key === "id") return "openrouter";
-					if (key === "name") return "OpenRouter (AI Gateway)";
-					if (key === "getModels") return () => openrouter;
+					if (key === "getModels") return () => pinned;
 					if (key === "getAllModels") return undefined;
 					const value = Reflect.get(target, key);
 					return typeof value === "function" ? value.bind(target) : value;
