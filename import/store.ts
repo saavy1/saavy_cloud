@@ -1,5 +1,6 @@
 // The import's memory, in a local SQLite file with the brain's schema: built here (resumable: stop and rerun at any
 // time, finished nodes stay), then uploaded to the brain.
+import { chmodSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { Hit, Kind, MemoryStore, Msg, Node, Part } from "../core/store.ts";
 
@@ -9,7 +10,12 @@ export class NodeSqliteStore implements MemoryStore {
 	#treeSize: number;
 
 	constructor(path: string) {
+		// Private history: readable by its owner only (the -wal/-shm files follow the umask).
+		const umask = process.umask(0o077);
 		this.db = new DatabaseSync(path);
+		this.db.exec("PRAGMA journal_mode = WAL");
+		process.umask(umask);
+		chmodSync(path, 0o600);
 		this.db.exec(`
 			PRAGMA journal_mode = WAL;
 			PRAGMA synchronous = NORMAL;

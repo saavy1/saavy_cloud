@@ -3,9 +3,11 @@
 
 export const NAME = "Saavy";
 
-/** A realistic summary line of exactly NODE (512) bytes, shown to the compactor for scale. */
-export const SCALE =
-	"user: switch the importer to stream rows instead of loading the CSV, keep the old path behind --legacy, and never touch prod.yaml unasked; talk: agreed, plan is a chunked reader in src/import/stream.ts; tool: read src/import/csv.ts (420 lines, loads whole file, parses with papaparse, builds Row[]); tool: added StreamReader with 64 KB chunks and backpressure; echo: npm test failed, 2 of 118 (quoted newlines split rows in fixtures/multiline.csv); talk: fixed quote state across chunks, tests pass, 3x less RAM.";
+/**
+ * A ruler exactly NODE (512) bytes long, shown to the compactor for scale. Content-free on purpose: a realistic sample
+ * line here got copied into real summaries by weaker models, as if it were part of the chat.
+ */
+export const SCALE = Array.from({ length: 8 }, (_, n) => String((n + 1) * 64).padStart(64, ".")).join("");
 
 export const COMPACT = `You write the memory of ${NAME}, an AI agent that works for one user in one
 endless chat, through tools and subagents. Each message has a kind: user

@@ -276,8 +276,8 @@ export class Memory {
 		if (model === undefined) throw new Error("No compactor model available");
 		const step =
 			l === 0
-				? `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\nCompress this message into one line, in at most ${NODE} bytes:\n${this.log.at(i)!.kind}: ${this.log.at(i)!.text}`
-				: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\nMerge these two lines into one, in at most ${NODE} bytes:\n${flat(this.tree.get(l - 1, 2 * i)!.text)}\n${flat(this.tree.get(l - 1, 2 * i + 1)!.text)}`;
+				? `For scale, this ruler is exactly ${NODE} bytes (a length, not content):\n${SCALE}\n\nCompress this message into one line, in at most ${NODE} bytes:\n${this.log.at(i)!.kind}: ${this.log.at(i)!.text}`
+				: `For scale, this ruler is exactly ${NODE} bytes (a length, not content):\n${SCALE}\n\nMerge these two lines into one, in at most ${NODE} bytes:\n${flat(this.tree.get(l - 1, 2 * i)!.text)}\n${flat(this.tree.get(l - 1, 2 * i + 1)!.text)}`;
 		const messages: Message[] = [
 			{
 				role: "user",
@@ -294,6 +294,8 @@ export class Memory {
 			const line = reply.content
 				.flatMap((block) => (block.type === "text" ? [block.text] : []))
 				.join("")
+				// The retry note marks where the limit falls; a model may echo the marker back.
+				.replace(/\s*\|?\s*← LIMIT\s*/g, " ")
 				.trim();
 			if (line === "") throw new Error(`Empty summary for ${start(l, i)}+${2 ** l}`);
 			tries.push(line);
@@ -304,7 +306,9 @@ export class Memory {
 				timestamp: Date.now(),
 			});
 		}
-		const text = tries.reduce((best, line) => (bytes(line) < bytes(best) ? line : best));
+		// The shortest try, cut at the limit if no try fit: a node never takes more than its share of the view.
+		const shortest = tries.reduce((best, line) => (bytes(line) < bytes(best) ? line : best));
+		const text = bytes(shortest) <= NODE ? shortest : `${cutBytes(shortest, NODE - 3).trimEnd()}…`;
 		this.tree.put({ l, i, text, size: bytes(text), key: last.key });
 	}
 
